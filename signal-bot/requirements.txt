@@ -1,0 +1,45 @@
+# LS Trading Signal System — Bot Dependencies
+# Python 3.10+
+
+# Core async
+asyncio-throttle==1.0.2
+
+# Data & Indicators
+pandas==2.2.2
+numpy==1.26.4
+pandas-ta==0.3.14b
+requests==2.31.0
+yfinance==0.2.40
+
+# MT5 data bridge (Windows only; comment out on Linux)
+# MetaTrader5==5.0.4874
+
+# Database
+PyMySQL==1.1.0
+SQLAlchemy==2.0.30
+
+# Flask API
+Flask==3.0.3
+Flask-CORS==4.0.0
+gunicorn==22.0.0
+
+# News / RSS
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+lxml==5.2.2
+
+# AI
+anthropic==0.28.0
+
+# Telegram
+python-telegram-bot==21.3
+
+# Scheduling
+APScheduler==3.10.4
+
+# Environment
+python-dotenv==1.0.1
+
+# Utilities
+pytz==2024.1
+aiohttp==3.9.5
