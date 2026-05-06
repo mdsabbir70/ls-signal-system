@@ -24,6 +24,7 @@ Endpoints:
 from __future__ import annotations
 import asyncio
 import json
+import time
 import threading
 from functools import wraps
 
@@ -578,6 +579,17 @@ def create_app(db, config) -> Flask:
                 best_pips     = best['total_pips']     if best else None
                 best_pf       = best['profit_factor']  if best else None
 
+                # ── Build multi-TF map from ALL profitable (not just top 100) ──
+                # key = strategy_name + '|' + params_label
+                # value = sorted list of timeframes where strategy is profitable
+                _mtf: dict = {}
+                for r in profitable:
+                    key = (r.get('strategy_name') or r.get('strategy', '')) + '|' + (r.get('params_label') or '')
+                    if key not in _mtf:
+                        _mtf[key] = set()
+                    _mtf[key].add(r['timeframe'])
+                multi_tf_map = {k: sorted(v) for k, v in _mtf.items()}
+
                 completed_data = {
                     'status': 'completed',
                     'pair': pair,
@@ -585,8 +597,9 @@ def create_app(db, config) -> Flask:
                     'total_tested': len(results),
                     'total_winners': len(all_winners),
                     'total_profitable': len(profitable),
-                    'results': profitable[:100],
+                    'results': profitable[:200],   # increased from 100 to 200
                     'all_winners': all_winners[:50],
+                    'multi_tf_map': multi_tf_map,  # complete TF map from ALL profitable
                     'best_strategy': best_strategy,
                     'best_wr': best_wr,
                     'best_pips': best_pips,
@@ -690,6 +703,201 @@ def create_app(db, config) -> Flask:
     def discovery_clear():
         _running_discoveries.clear()
         return ok({'message': 'Cleared'})
+
+    # ── Pattern Analysis ────────────────────────────────────────────────
+
+    _running_patterns: dict = {}
+
+    @app.route('/api/pattern/run', methods=['POST'])
+    @require_api_key
+    def run_pattern():
+        data = request.get_json() or {}
+        pair          = data.get('pair', 'EURUSD').upper()
+        timeframes    = data.get('timeframes', ['H1', 'H4', 'D1'])
+        min_wr        = float(data.get('min_win_rate', 60.0))
+        min_trades    = int(data.get('min_trades', 5))
+        lookback_days = int(data.get('lookback_days', 0))
+
+        for pid, info in list(_running_patterns.items()):
+            if info.get('status') == 'running':
+                return err(f'Pattern analysis already running ({pid}). Wait.')
+
+        import uuid
+        pat_id = f"PAT-{pair}-{uuid.uuid4().hex[:6]}"
+        _running_patterns[pat_id] = {
+            'status': 'running',
+            'pair': pair,
+            'timeframes': timeframes,
+            'min_win_rate': min_wr,
+            'started_at': __import__('datetime').datetime.now().isoformat(),
+        }
+
+        def _run_pat():
+            import sys, os, warnings
+            warnings.filterwarnings('ignore')
+            src = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+            if src not in sys.path:
+                sys.path.insert(0, src)
+            try:
+                from patterns.pattern_engine import PatternEngine
+                engine = PatternEngine(
+                    pair=pair, timeframes=timeframes,
+                    min_win_rate=min_wr, min_trades=min_trades,
+                    output_dir='/tmp', lookback_days=lookback_days,
+                )
+                results = engine.run()
+
+                profitable = [
+                    r for r in results
+                    if r['win_rate'] >= min_wr
+                    and r['total_trades'] >= min_trades
+                    and r['total_pips'] > 0
+                    and r['profit_factor'] > 1.0
+                ]
+                profitable.sort(key=lambda x: (-x['profit_factor'], -x['win_rate']))
+
+                all_winners = [
+                    r for r in results
+                    if r['win_rate'] >= min_wr and r['total_trades'] >= min_trades
+                ]
+
+                best = profitable[0] if profitable else None
+
+                # Multi-TF map
+                _mtf: dict = {}
+                for r in profitable:
+                    key = (r.get('strategy_name', '') + '|' + (r.get('filter_name') or ''))
+                    if key not in _mtf:
+                        _mtf[key] = set()
+                    _mtf[key].add(r['timeframe'])
+                multi_tf_map = {k: sorted(v) for k, v in _mtf.items()}
+
+                _running_patterns[pat_id] = {
+                    'status': 'completed',
+                    'pair': pair,
+                    'timeframes': timeframes,
+                    'total_tested': len(results),
+                    'total_winners': len(all_winners),
+                    'total_profitable': len(profitable),
+                    'results': profitable[:200],
+                    'multi_tf_map': multi_tf_map,
+                    'best_strategy': best['strategy_name'] if best else None,
+                    'best_wr': best['win_rate'] if best else None,
+                    'best_pips': best['total_pips'] if best else None,
+                    'best_pf': best['profit_factor'] if best else None,
+                }
+
+                # Save to DB
+                try:
+                    db.execute_write(
+                        """INSERT INTO pattern_results
+                           (pattern_id, pair, timeframes, min_win_rate, min_trades,
+                            total_tested, total_winners, total_profitable,
+                            best_strategy, best_wr, best_pips, best_pf, results_json)
+                           VALUES (:p0,:p1,:p2,:p3,:p4,:p5,:p6,:p7,:p8,:p9,:p10,:p11,:p12)
+                           ON DUPLICATE KEY UPDATE
+                           total_tested=VALUES(total_tested),
+                           total_winners=VALUES(total_winners),
+                           total_profitable=VALUES(total_profitable),
+                           best_strategy=VALUES(best_strategy),
+                           best_wr=VALUES(best_wr), best_pips=VALUES(best_pips),
+                           best_pf=VALUES(best_pf), results_json=VALUES(results_json)""",
+                        (
+                            pat_id, pair, ','.join(timeframes), min_wr, min_trades,
+                            len(results), len(all_winners), len(profitable),
+                            best['strategy_name'] if best else None,
+                            best['win_rate'] if best else None,
+                            best['total_pips'] if best else None,
+                            best['profit_factor'] if best else None,
+                            json.dumps(profitable[:100], default=str),
+                        )
+                    )
+                except Exception as db_err:
+                    logger.error(f"Pattern DB save failed: {db_err}")
+
+                logger.info(f"Pattern {pat_id}: {len(profitable)} profitable found")
+            except Exception as e:
+                _running_patterns[pat_id] = {'status': 'failed', 'error': str(e)}
+                logger.error(f"Pattern {pat_id} failed: {e}")
+
+        thread = threading.Thread(target=_run_pat, daemon=True)
+        thread.start()
+
+        return ok({'message': 'Pattern analysis started', 'pattern_id': pat_id, 'pair': pair}, 202)
+
+    @app.route('/api/pattern/status')
+    @require_api_key
+    def pattern_status():
+        return ok({'patterns': _running_patterns})
+
+    @app.route('/api/pattern/history')
+    @require_api_key
+    def pattern_history():
+        rows = db.execute(
+            """SELECT id, pattern_id, pair, timeframes, min_win_rate, min_trades,
+                      total_tested, total_winners, total_profitable,
+                      best_strategy, best_wr, best_pips, best_pf, created_at
+               FROM pattern_results
+               ORDER BY created_at DESC LIMIT 50"""
+        )
+        return ok({'history': rows})
+
+    @app.route('/api/pattern/<pattern_id>', methods=['DELETE'])
+    @require_api_key
+    def pattern_delete(pattern_id):
+        row = db.execute_one(
+            "SELECT id FROM pattern_results WHERE pattern_id = :p0",
+            (pattern_id,)
+        )
+        if not row:
+            return err('Pattern result not found', 404)
+        db.execute_write(
+            "DELETE FROM pattern_results WHERE pattern_id = :p0",
+            (pattern_id,)
+        )
+        _running_patterns.pop(pattern_id, None)
+        return ok({'message': f'Deleted {pattern_id}'})
+
+    # ── Data Cache API ──────────────────────────────────────────────────────
+
+    _data_refresh_status: dict = {}
+
+    @app.route('/api/data/refresh', methods=['POST'])
+    @require_api_key
+    def data_refresh():
+        """Download fresh market data for all pairs."""
+        from data.market_data_cache import download_all, ALL_PAIRS, DEFAULT_TIMEFRAMES
+
+        pairs = request.json.get('pairs', ALL_PAIRS) if request.is_json else ALL_PAIRS
+        tfs = request.json.get('timeframes', DEFAULT_TIMEFRAMES) if request.is_json else DEFAULT_TIMEFRAMES
+
+        if _data_refresh_status.get('status') == 'running':
+            return ok({'message': 'Data refresh already running', **_data_refresh_status})
+
+        def _run_refresh():
+            _data_refresh_status.update({'status': 'running', 'started': time.strftime('%H:%M:%S')})
+            try:
+                success, failed = download_all(pairs, tfs)
+                _data_refresh_status.update({
+                    'status': 'completed', 'success': success,
+                    'failed': failed, 'finished': time.strftime('%H:%M:%S'),
+                })
+                logger.info(f"Data refresh: {success} OK, {failed} failed")
+            except Exception as e:
+                _data_refresh_status.update({'status': 'failed', 'error': str(e)})
+                logger.error(f"Data refresh failed: {e}")
+
+        import time as _time_mod
+        thread = threading.Thread(target=_run_refresh, daemon=True)
+        thread.start()
+        return ok({'message': 'Data refresh started', 'pairs': len(pairs), 'timeframes': tfs}, 202)
+
+    @app.route('/api/data/status')
+    @require_api_key
+    def data_status():
+        from data.market_data_cache import get_cache_info
+        info = get_cache_info()
+        return ok({'files': info, 'total': len(info), 'refresh': _data_refresh_status})
 
     # ── Health check (no auth) ────────────────────────────────────────────
 

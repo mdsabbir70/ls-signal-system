@@ -27,6 +27,7 @@
             'historical.php'=> ['icon' => '🗄️', 'label' => 'Historical'],
             'backtest.php'  => ['icon' => '🧪', 'label' => 'Backtest'],
             'discovery.php' => ['icon' => '🔍', 'label' => 'Discovery'],
+            'TECHNICAL-ANALYSIS.php' => ['icon' => '🕯️', 'label' => 'Patterns'],
             'sentiment.php' => ['icon' => '🧠', 'label' => 'Sentiment'],
             'settings.php'  => ['icon' => '⚙️', 'label' => 'Settings'],
         ];

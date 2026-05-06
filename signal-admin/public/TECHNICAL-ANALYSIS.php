@@ -1,0 +1,773 @@
+<?php
+require_once __DIR__ . '/../includes/config.php';
+require_once __DIR__ . '/../includes/db.php';
+require_once __DIR__ . '/../includes/auth.php';
+
+require_login();
+$page_title = 'Technical Analysis';
+
+// All pairs for dropdown
+$pairs = db_query("SELECT symbol, category FROM pairs ORDER BY category, symbol", []);
+
+require_once __DIR__ . '/../includes/header.php';
+?>
+
+<style>
+/* ── Pattern Analysis Page Styles ───────────────────────────── */
+.disc-grid { display:grid; grid-template-columns:320px 1fr; gap:1.25rem; align-items:start; }
+@media(max-width:960px){ .disc-grid { grid-template-columns:1fr; } }
+
+.tf-grid  { display:grid; grid-template-columns:repeat(3,1fr); gap:.4rem; }
+.tf-check { display:flex; align-items:center; gap:.4rem; cursor:pointer; font-size:.85rem;
+            padding:.3rem .5rem; border:1px solid var(--border); border-radius:6px;
+            color:var(--text-muted); transition:all .15s; user-select:none; }
+.tf-check:hover { border-color:var(--primary); color:var(--text); }
+.tf-check input { accent-color:var(--primary); width:13px; height:13px; flex-shrink:0; }
+.tf-check.checked { border-color:var(--primary); background:rgba(59,130,246,.12);
+                    color:var(--text); font-weight:600; }
+
+.progress-bar { height:5px; background:var(--border); border-radius:3px; overflow:hidden; margin-top:.5rem; }
+.progress-fill { height:100%; background:var(--primary); border-radius:3px;
+                 transition:width .4s; animation:pulse-bar 1.5s ease-in-out infinite; }
+@keyframes pulse-bar { 0%,100%{opacity:.6} 50%{opacity:1} }
+
+/* Status box — dark theme compatible */
+.status-box { padding:.875rem 1rem; border-radius:8px; border:1px solid var(--border);
+              font-size:.85rem; line-height:1.7; color:var(--text); background:var(--bg-card); }
+.status-box.running { border-color:#f59e0b; background:rgba(245,158,11,.08); color:#fbbf24; }
+.status-box.done    { border-color:#22c55e; background:rgba(34,197,94,.08);  color:#4ade80; }
+.status-box.error   { border-color:#ef4444; background:rgba(239,68,68,.08);  color:#f87171; }
+
+/* Stats row */
+.stat-row { display:flex; gap:.75rem; flex-wrap:wrap; margin-bottom:1rem; }
+.stat-box { flex:1; min-width:90px; text-align:center; padding:.6rem .75rem;
+            border:1px solid var(--border); border-radius:8px; background:var(--bg); }
+.stat-box .num { font-size:1.4rem; font-weight:700; color:var(--primary); }
+.stat-box .lbl { font-size:.72rem; color:var(--text-muted); margin-top:.1rem; }
+
+/* Category badges */
+.cat-badge { font-size:.68rem; padding:.12rem .45rem; border-radius:20px; font-weight:700;
+             display:inline-block; text-transform:uppercase; letter-spacing:.04em; }
+.cat-candlestick  { background:rgba(59,130,246,.2);  color:#93c5fd; }
+.cat-chart_pattern{ background:rgba(168,85,247,.2);  color:#d8b4fe; }
+.cat-trend        { background:rgba(59,130,246,.2);  color:#93c5fd; }
+.cat-reversal     { background:rgba(236,72,153,.2);  color:#f9a8d4; }
+.cat-multi        { background:rgba(168,85,247,.2);  color:#d8b4fe; }
+.cat-breakout     { background:rgba(34,197,94,.2);   color:#86efac; }
+.cat-momentum     { background:rgba(245,158,11,.2);  color:#fcd34d; }
+.cat-volatility   { background:rgba(239,68,68,.2);   color:#fca5a5; }
+.cat-price_action { background:rgba(6,182,212,.2);   color:#67e8f9; }
+
+/* Win rate bar */
+.wr-bar { width:50px; height:6px; background:var(--border); border-radius:3px;
+          display:inline-block; vertical-align:middle; margin-left:5px; overflow:hidden; }
+.wr-fill { height:100%; border-radius:3px; background:#22c55e; }
+
+/* PF pill */
+.pill-pf  { font-size:.72rem; padding:.12rem .45rem; border-radius:10px; font-weight:700; }
+.pill-pos { background:rgba(34,197,94,.2);  color:#4ade80; }
+.pill-neg { background:rgba(239,68,68,.2);  color:#f87171; }
+
+/* Filter row — dark theme */
+.filter-row { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap;
+              padding:.6rem 0; border-bottom:1px solid var(--border); margin-bottom:.75rem; }
+.filter-row label { font-size:.8rem; color:var(--text-muted); cursor:pointer;
+                    display:flex; align-items:center; gap:.3rem; }
+.filter-row select, .filter-row input[type=text] {
+    padding:.28rem .55rem; font-size:.8rem; border:1px solid var(--border);
+    border-radius:6px; background:var(--bg); color:var(--text); outline:none; }
+.filter-row select:focus, .filter-row input[type=text]:focus {
+    border-color:var(--primary); }
+
+/* Results table */
+#results-table th { white-space:nowrap; font-size:.78rem; padding:.5rem .6rem; }
+#results-table td { vertical-align:middle; padding:.4rem .6rem; }
+#results-table tbody tr:hover { background:rgba(59,130,246,.05); }
+
+/* History table */
+.history-scroll { overflow-x:auto; }
+#history-table { min-width:800px; width:100%; }
+#history-table th { white-space:nowrap; font-size:.75rem; padding:.45rem .55rem; }
+#history-table td { font-size:.8rem; padding:.45rem .55rem; vertical-align:middle; white-space:nowrap; }
+#history-table td:nth-child(7) { white-space:normal; max-width:180px; overflow:hidden; text-overflow:ellipsis; }
+
+/* Sort buttons */
+.sort-btn { cursor:pointer; user-select:none; }
+.sort-btn:after { content:' ↕'; opacity:.35; font-size:.8em; }
+.sort-btn.asc:after  { content:' ↑'; opacity:1; color:var(--primary); }
+.sort-btn.desc:after { content:' ↓'; opacity:1; color:var(--primary); }
+
+/* TF pills — compact, only active shown */
+.tf-pill { display:inline-block; font-size:.62rem; font-weight:700; padding:.1rem .32rem;
+           border-radius:4px; margin:.05rem .05rem; letter-spacing:.02em; white-space:nowrap; }
+.tf-pill-active   { background:rgba(99,102,241,.3); color:#a5b4fc; border:1px solid rgba(99,102,241,.5); }
+.tf-pill-inactive { display:none; }
+
+/* Multi-TF badge */
+.multi-tf-badge { display:inline-block; font-size:.62rem; font-weight:700; padding:.12rem .38rem;
+                  border-radius:10px; background:#f59e0b; color:#fff; margin-left:3px;
+                  vertical-align:middle; white-space:nowrap; }
+</style>
+
+<!-- ── Main Layout ─────────────────────────────────────────────── -->
+<div class="disc-grid">
+
+    <!-- Left: Form -->
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>🔍 Pattern Analysis</h2>
+            </div>
+            <div class="card-body" style="display:flex;flex-direction:column;gap:1rem">
+
+                <!-- Pair -->
+                <div class="form-group" style="margin:0">
+                    <label>Pair</label>
+                    <select id="disc-pair" class="form-control">
+                        <?php
+                        $cached_pairs = [
+                            'BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT','DOGEUSDT','ADAUSDT','LINKUSDT','DOTUSDT','PEPEUSDT',
+                            'EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','USDCAD','NZDUSD','XAUUSD',
+                            'EURJPY','GBPJPY','AUDJPY','EURGBP',
+                        ];
+                        $last_cat = '';
+                        foreach ($pairs as $p):
+                            if ($p['category'] !== $last_cat):
+                                if ($last_cat !== '') echo '</optgroup>';
+                                $label = ucfirst(strtolower($p['category']));
+                                echo "<optgroup label=\"{$label}\">";
+                                $last_cat = $p['category'];
+                            endif;
+                            $sel = ($p['symbol'] === 'EURUSD') ? 'selected' : '';
+                            $cached = in_array($p['symbol'], $cached_pairs) ? ' ✓' : ' (no cache)';
+                            echo "<option value=\"{$p['symbol']}\" {$sel}>{$p['symbol']}{$cached}</option>";
+                        endforeach;
+                        if ($last_cat !== '') echo '</optgroup>';
+                        ?>
+                    </select>
+                    <div id="pair-cache-warn" style="display:none;margin-top:.4rem;padding:.5rem .75rem;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;font-size:.8rem;color:#991b1b;">
+                        ⚠️ এই pair এর cached data নেই। অন্য একটি pair select করুন।
+                    </div>
+                </div>
+
+                <!-- Timeframes -->
+                <div class="form-group" style="margin:0">
+                    <label style="display:flex;justify-content:space-between">
+                        <span>Timeframes</span>
+                        <span style="font-size:.75rem;color:var(--text-muted)">
+                            <a href="#" id="tf-all" style="text-decoration:none">All</a> /
+                            <a href="#" id="tf-main" style="text-decoration:none">Main (H1 H4 D1)</a>
+                        </span>
+                    </label>
+                    <div class="tf-grid">
+                        <?php foreach (['M5','M15','M30','H1','H4','D1'] as $tf):
+                            $checked = in_array($tf, ['H1','H4','D1']) ? 'checked' : '';
+                            $cls = $checked ? 'checked' : '';
+                        ?>
+                        <label class="tf-check <?= $cls ?>" id="lbl-<?= $tf ?>">
+                            <input type="checkbox" class="tf-cb" value="<?= $tf ?>" <?= $checked ?>>
+                            <?= $tf ?>
+                        </label>
+                        <?php endforeach; ?>
+                    </div>
+                    <div style="font-size:.72rem;color:var(--text-muted);margin-top:.3rem">
+                        M5/M15/M30 = ~60 days data &nbsp;|&nbsp; H1/H4 = ~2 years &nbsp;|&nbsp; D1 = ~10 years
+                    </div>
+                </div>
+
+                <!-- Min Win Rate -->
+                <div class="form-group" style="margin:0">
+                    <label>Min Win Rate: <strong id="wr-val">60%</strong></label>
+                    <input type="range" id="disc-wr" min="50" max="80" step="1" value="60"
+                           style="width:100%;accent-color:var(--primary)"
+                           oninput="document.getElementById('wr-val').textContent=this.value+'%'">
+                    <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--text-muted)">
+                        <span>50% (more)</span><span>65% (balanced)</span><span>80% (strict)</span>
+                    </div>
+                </div>
+
+                <!-- Min Trades -->
+                <div class="form-group" style="margin:0">
+                    <label>Min Trades (for validity)</label>
+                    <select id="disc-mintrades" class="form-control">
+                        <option value="5" selected>5 trades</option>
+                        <option value="10">10 trades</option>
+                        <option value="20">20 trades</option>
+                        <option value="30">30 trades</option>
+                    </select>
+                </div>
+
+                <!-- Data Period -->
+                <div class="form-group" style="margin:0">
+                    <label>Data Period <span style="font-size:.72rem;color:var(--text-muted)">(yfinance limit: M5/M15/M30 max 60d, H1/H4 max 2y)</span></label>
+                    <select id="disc-lookback" class="form-control">
+                        <option value="0">Default (auto per TF)</option>
+                        <option value="30">30 Days</option>
+                        <option value="60">60 Days</option>
+                        <option value="90">3 Months</option>
+                        <option value="180">6 Months</option>
+                        <option value="365">1 Year</option>
+                        <option value="730">2 Years</option>
+                        <option value="1825">5 Years</option>
+                        <option value="3650">10 Years</option>
+                    </select>
+                </div>
+
+                <!-- Run Button -->
+                <button id="run-btn" class="btn btn-primary" style="width:100%;font-size:1rem;padding:.7rem">
+                    ▶ Run Analysis
+                </button>
+
+                <div style="font-size:.75rem;color:var(--text-muted);text-align:center;line-height:1.5">
+                    Bot tests <strong>40 patterns × 6 filters × 9 SL/TP</strong> per timeframe.<br>
+                    Estimated time: ~10s per TF (H1: 15s, D1: 5s)
+                </div>
+
+            </div><!-- card-body -->
+        </div><!-- card -->
+
+        <!-- Status box -->
+        <div id="status-area" style="margin-top:1rem;display:none">
+            <div class="progress-bar" id="progress-bar" style="display:none;margin-bottom:.75rem">
+                <div class="progress-fill" id="progress-fill" style="width:30%"></div>
+            </div>
+            <div class="status-box" id="status-box"></div>
+        </div>
+
+    </div><!-- left -->
+
+    <!-- Right: Results -->
+    <div id="results-area">
+        <div class="card" style="min-height:300px">
+            <div class="card-header" style="gap:.75rem">
+                <h2>Results</h2>
+                <div id="results-header-stats" style="display:flex;gap:.5rem;flex-wrap:wrap"></div>
+            </div>
+            <div class="card-body">
+                <div id="results-empty" style="text-align:center;padding:3rem;color:var(--text-muted)">
+                    <div style="font-size:2.5rem;margin-bottom:.75rem">🔍</div>
+                    <div>Configure settings and click <strong>Run Analysis</strong></div>
+                    <div style="font-size:.8rem;margin-top:.5rem">
+                        Tests 40+ chart patterns (Engulfing, H&S, Triangles, S/R, Liquidity...) with indicator filters.
+                    </div>
+                </div>
+
+                <!-- Filter row (hidden until results) -->
+                <div id="filter-row" class="filter-row" style="display:none">
+                    <label style="font-size:.8rem;color:var(--text-muted)">Filter:</label>
+                    <input type="text" id="filter-strategy" placeholder="Strategy name..." style="width:160px">
+                    <select id="filter-tf">
+                        <option value="">All TF</option>
+                        <option>M5</option><option>M15</option><option>M30</option>
+                        <option>H1</option><option>H4</option><option>D1</option>
+                    </select>
+                    <select id="filter-cat">
+                        <option value="">All Categories</option>
+                        <option value="candlestick">Candlestick</option>
+                        <option value="chart_pattern">Chart Pattern</option>
+                    </select>
+                    <label style="font-size:.82rem;color:var(--text);cursor:pointer"
+                           title="২+ TF এ profitable strategies দেখায়। কাজ করতে হলে একাধিক TF select করে Run দিন।">
+                        <input type="checkbox" id="filter-multitf"> Multi-TF only ★
+                        <span style="font-size:.68rem;color:#6b7280">(২+ TF select করুন)</span>
+                    </label>
+                    <label style="font-size:.82rem;color:var(--text);margin-left:auto;cursor:pointer">
+                        <input type="checkbox" id="filter-profitable" checked> Profitable only
+                    </label>
+                </div>
+
+                <!-- Results Table -->
+                <div id="results-table-wrap" style="display:none;overflow-x:auto">
+                    <table class="table" id="results-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th class="sort-btn" data-col="strategy_name">Strategy</th>
+                                <th class="sort-btn" data-col="timeframe">TF</th>
+                                <th class="sort-btn" data-col="_tf_count" title="Number of timeframes this strategy is profitable in">TF Count ★</th>
+                                <th>Category</th>
+                                <th class="sort-btn" data-col="total_trades">Trades</th>
+                                <th class="sort-btn asc" data-col="win_rate">Win%</th>
+                                <th class="sort-btn" data-col="total_pips">Pips</th>
+                                <th class="sort-btn" data-col="profit_factor">PF</th>
+                                <th class="sort-btn" data-col="sharpe">Sharpe</th>
+                                <th>SL/TP</th>
+                            </tr>
+                        </thead>
+                        <tbody id="results-tbody"></tbody>
+                    </table>
+                    <div id="results-count" style="font-size:.8rem;color:var(--text-muted);padding:.5rem 0"></div>
+                </div>
+
+            </div><!-- card-body -->
+        </div><!-- card -->
+    </div><!-- right -->
+</div><!-- grid -->
+
+
+<script>
+// ── Data Store ────────────────────────────────────────────────────────────────
+let allResults  = [];
+let multiTFMap  = {};   // key → Set of TFs where strategy is profitable
+let sortCol     = 'win_rate';
+let sortDir     = 'desc';
+let pollTimer   = null;
+let currentId   = null;
+
+// ── TF Checkboxes ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.tf-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+        const lbl = document.getElementById('lbl-' + cb.value);
+        lbl.classList.toggle('checked', cb.checked);
+    });
+});
+
+document.getElementById('tf-all').addEventListener('click', e => {
+    e.preventDefault();
+    document.querySelectorAll('.tf-cb').forEach(cb => {
+        cb.checked = true;
+        document.getElementById('lbl-' + cb.value).classList.add('checked');
+    });
+});
+
+document.getElementById('tf-main').addEventListener('click', e => {
+    e.preventDefault();
+    document.querySelectorAll('.tf-cb').forEach(cb => {
+        const main = ['H1','H4','D1'].includes(cb.value);
+        cb.checked = main;
+        document.getElementById('lbl-' + cb.value).classList.toggle('checked', main);
+    });
+});
+
+// ── Sort ─────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.sort-btn').forEach(th => {
+    th.addEventListener('click', () => {
+        const col = th.dataset.col;
+        if (sortCol === col) {
+            sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+            sortCol = col;
+            sortDir = 'desc';
+        }
+        document.querySelectorAll('.sort-btn').forEach(h => {
+            h.classList.remove('asc','desc');
+        });
+        th.classList.add(sortDir);
+        renderTable();
+    });
+});
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+['filter-strategy','filter-tf','filter-cat','filter-profitable','filter-multitf'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', renderTable);
+    if (el && el.tagName === 'INPUT' && el.type === 'text')
+        el.addEventListener('input', renderTable);
+});
+
+// ── Pair cache warning on change ─────────────────────────────────────────────
+document.getElementById('disc-pair').addEventListener('change', function() {
+    const opt = this.options[this.selectedIndex];
+    const nocache = opt.text.includes('(no cache)');
+    const warnEl = document.getElementById('pair-cache-warn');
+    if (warnEl) {
+        warnEl.style.display = nocache ? 'block' : 'none';
+    }
+});
+
+// ── Run Button ───────────────────────────────────────────────────────────────
+document.getElementById('run-btn').addEventListener('click', () => {
+    const tfs = Array.from(document.querySelectorAll('.tf-cb:checked')).map(c => c.value);
+    if (!tfs.length) { alert('Please select at least one timeframe.'); return; }
+
+    const pairSel  = document.getElementById('disc-pair');
+    const pair     = pairSel.value;
+    const selOpt   = pairSel.options[pairSel.selectedIndex];
+    if (selOpt && selOpt.text.includes('(no cache)')) {
+        showStatus('error', `⚠️ <strong>${pair}</strong> এর কোন cached data নেই! ✓ চিহ্নিত pair select করুন।`);
+        return;
+    }
+
+    const wr       = document.getElementById('disc-wr').value;
+    const mintrd   = document.getElementById('disc-mintrades').value;
+    const lookback = document.getElementById('disc-lookback').value;
+
+    setRunning(true, `Starting discovery for ${pair}...`);
+
+    const fd = new FormData();
+    fd.append('pair', pair);
+    tfs.forEach(tf => fd.append('timeframes[]', tf));
+    fd.append('min_win_rate', wr);
+    fd.append('min_trades', mintrd);
+    fd.append('lookback_days', lookback);
+
+    fetch('/actions/pattern_run.php', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(data => {
+            if (!data.success && !data.pattern_id) {
+                showError(data.error || 'Failed to start discovery');
+                setRunning(false);
+                return;
+            }
+            currentId = data.pattern_id;
+            const lbLabel = lookback === '0' ? 'default' : lookback + ' days';
+            showStatus('running', `Pattern analysis started for <strong>${pair}</strong> [${tfs.join(', ')}]<br>
+                Data: <strong>${lbLabel}</strong> &nbsp;|&nbsp; ID: ${currentId}<br>
+                Estimated time: ${tfs.length * 15}–${tfs.length * 30}s`);
+            pollTimer = setInterval(pollStatus, 4000);
+        })
+        .catch(e => { showError(e.message); setRunning(false); });
+});
+
+// ── Poll Status ───────────────────────────────────────────────────────────────
+function pollStatus() {
+    fetch('/actions/pattern_status.php?id=' + encodeURIComponent(currentId))
+        .then(r => r.json())
+        .then(data => {
+            if (!data.patterns) return;
+            const disc = data.patterns[currentId];
+            if (!disc) return;
+
+            if (disc.status === 'completed') {
+                clearInterval(pollTimer);
+                setRunning(false);
+                const profitable = disc.total_profitable || 0;
+                const tested     = disc.total_tested || 0;
+                const winners    = disc.total_winners || 0;
+
+                if (tested === 0) {
+                    showStatus('error', `⚠️ কোন data পাওয়া যায়নি। ✓ চিহ্নিত pair select করুন।`);
+                } else {
+                    showStatus('done',
+                        `✅ Pattern analysis complete!<br>
+                        Tested: <strong>${tested}</strong> strategies &nbsp;|&nbsp;
+                        Winners (WR≥threshold): <strong>${winners}</strong> &nbsp;|&nbsp;
+                        <strong style="color:#10b981">${profitable} profitable</strong> (positive pips + PF&gt;1)`
+                    );
+                    displayResults(disc.results || [], disc);
+                }
+            }
+            else if (disc.status === 'failed') {
+                clearInterval(pollTimer);
+                setRunning(false);
+                showError(disc.error || 'Pattern analysis failed');
+            }
+            else {
+                // Still running — animate progress
+                const fill = document.getElementById('progress-fill');
+                const w = parseFloat(fill.style.width) || 30;
+                fill.style.width = Math.min(w + 8, 90) + '%';
+            }
+        })
+        .catch(() => {});
+}
+
+// ── Display Results ───────────────────────────────────────────────────────────
+function buildMultiTFMap(serverMap, results) {
+    // Prefer server-side map (covers ALL profitable, not just top 200)
+    if (serverMap && typeof serverMap === 'object') {
+        // Convert arrays back to Sets
+        const map = {};
+        for (const [key, tfs] of Object.entries(serverMap)) {
+            map[key] = new Set(Array.isArray(tfs) ? tfs : [tfs]);
+        }
+        return map;
+    }
+    // Fallback: build from results array (may undercount if > 200 profitable)
+    const map = {};
+    results.forEach(r => {
+        if (r.total_pips > 0 && r.profit_factor > 1) {
+            const key = (r.strategy_name || r.strategy) + '|' + (r.params_label || '');
+            if (!map[key]) map[key] = new Set();
+            map[key].add(r.timeframe);
+        }
+    });
+    return map;
+}
+
+function displayResults(results, meta) {
+    allResults = results;
+    multiTFMap = buildMultiTFMap(meta.multi_tf_map, results);
+
+    // Count strategies profitable in 2+ TFs
+    const multiTFCount = Object.values(multiTFMap).filter(s => s.size >= 2).length;
+
+    document.getElementById('results-empty').style.display = 'none';
+    document.getElementById('filter-row').style.display = 'flex';
+    document.getElementById('results-table-wrap').style.display = 'block';
+
+    // Header stats
+    const stats = document.getElementById('results-header-stats');
+    stats.innerHTML = `
+        <div class="stat-box"><div class="num">${meta.total_tested||0}</div><div class="lbl">Tested</div></div>
+        <div class="stat-box"><div class="num" style="color:#f59e0b">${meta.total_winners||0}</div><div class="lbl">Winners (WR%)</div></div>
+        <div class="stat-box"><div class="num" style="color:#10b981">${meta.total_profitable||0}</div><div class="lbl">Profitable</div></div>
+        <div class="stat-box"><div class="num" style="color:#f59e0b">${multiTFCount}</div><div class="lbl">Multi-TF ★</div></div>
+    `;
+
+    renderTable();
+}
+
+const ALL_TFS = ['M5','M15','M30','H1','H4','D1'];
+
+function renderTable() {
+    const qStr     = (document.getElementById('filter-strategy')?.value || '').toLowerCase();
+    const qTF      = document.getElementById('filter-tf')?.value || '';
+    const qCat     = document.getElementById('filter-cat')?.value || '';
+    const onlyProf = document.getElementById('filter-profitable')?.checked ?? true;
+    const onlyMTF  = document.getElementById('filter-multitf')?.checked ?? false;
+
+    // Attach _tf_count to each row for sorting/filtering
+    let rows = allResults.map(r => {
+        const key = (r.strategy_name || r.strategy) + '|' + (r.params_label || '');
+        const tfs = multiTFMap[key] || new Set();
+        return { ...r, _tf_count: tfs.size, _tf_set: tfs };
+    });
+
+    rows = rows.filter(r => {
+        if (onlyProf && (r.total_pips <= 0 || r.profit_factor <= 1)) return false;
+        if (onlyMTF  && r._tf_count < 2) return false;
+        if (qStr && !(r.strategy || '').toLowerCase().includes(qStr) &&
+                    !(r.strategy_name || '').toLowerCase().includes(qStr)) return false;
+        if (qTF  && r.timeframe !== qTF) return false;
+        if (qCat && r.category !== qCat) return false;
+        return true;
+    });
+
+    // Sort
+    rows.sort((a,b) => {
+        let va = a[sortCol] ?? 0, vb = b[sortCol] ?? 0;
+        if (typeof va === 'string') va = va.toLowerCase();
+        if (typeof vb === 'string') vb = vb.toLowerCase();
+        return sortDir === 'asc' ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
+    });
+
+    const tbody = document.getElementById('results-tbody');
+    tbody.innerHTML = rows.map((r, i) => {
+        const pfCls  = r.profit_factor >= 1 ? 'pill-pos' : 'pill-neg';
+        const pipCol = r.total_pips >= 0 ? '#10b981' : '#ef4444';
+        const pipSign = r.total_pips >= 0 ? '+' : '';
+        const catCls  = 'cat-' + (r.category || 'trend');
+        const wrPct   = Math.min(r.win_rate, 100);
+        const sltp    = r.sl_tp || '';
+
+        // Build TF pills — show all 6 TFs, highlight those where this strategy is profitable
+        const tfPills = ALL_TFS.map(tf => {
+            const active = r._tf_set.has(tf);
+            return `<span class="tf-pill ${active ? 'tf-pill-active' : 'tf-pill-inactive'}">${tf}</span>`;
+        }).join('');
+
+        // Multi-TF badge
+        const mtfBadge = r._tf_count >= 2
+            ? `<span class="multi-tf-badge" title="Profitable in ${r._tf_count} timeframes">★ ${r._tf_count}TF</span>`
+            : '';
+
+        // Row highlight for multi-TF
+        const rowStyle = r._tf_count >= 2 ? 'background:rgba(245,158,11,.06)' : '';
+
+        return `<tr style="${rowStyle}">
+            <td style="color:var(--text-muted);font-size:.8rem">${i+1}</td>
+            <td>
+                <div style="font-size:.82rem;font-weight:600">
+                    ${escHtml(r.strategy_name || r.strategy)} ${mtfBadge}
+                </div>
+                <div style="font-size:.72rem;color:var(--text-muted)">${escHtml(r.params_label || '')}</div>
+            </td>
+            <td><strong>${escHtml(r.timeframe)}</strong></td>
+            <td style="white-space:nowrap">${tfPills}</td>
+            <td><span class="cat-badge ${catCls}">${escHtml(r.category||'')}</span></td>
+            <td style="text-align:center">${r.total_trades}</td>
+            <td>
+                <strong style="color:var(--primary)">${r.win_rate.toFixed(1)}%</strong>
+                <div class="wr-bar"><div class="wr-fill" style="width:${wrPct}%"></div></div>
+            </td>
+            <td><strong style="color:${pipCol}">${pipSign}${r.total_pips.toFixed(1)}</strong></td>
+            <td><span class="pill-pf ${pfCls}">${r.profit_factor.toFixed(2)}</span></td>
+            <td style="font-size:.82rem">${r.sharpe.toFixed(2)}</td>
+            <td style="font-size:.72rem;color:var(--text-muted)">${escHtml(sltp)}</td>
+        </tr>`;
+    }).join('');
+
+    const multiCount = rows.filter(r => r._tf_count >= 2).length;
+    const onlyMTFChecked = document.getElementById('filter-multitf')?.checked;
+
+    let countMsg = `Showing ${rows.length} of ${allResults.length} results`;
+    if (multiCount > 0) countMsg += ` — ${multiCount} multi-TF ★`;
+
+    // Show hint if Multi-TF filter active but no results
+    if (onlyMTFChecked && rows.length === 0) {
+        const tfsRan = [...new Set(allResults.map(r => r.timeframe))];
+        if (tfsRan.length <= 1) {
+            countMsg = `⚠️ Multi-TF শুধু তখন কাজ করে যখন ২+ TF select করে Run দেওয়া হয়। এখন শুধু ${tfsRan[0]||'?'} চালানো হয়েছে।`;
+        } else {
+            countMsg = `এই Run এ কোনো strategy একাধিক TF এ profitable নয়। বেশি TF select করে আবার চেষ্টা করুন।`;
+        }
+    }
+
+    document.getElementById('results-count').innerHTML = countMsg;
+}
+
+function escHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── UI Helpers ────────────────────────────────────────────────────────────────
+function setRunning(on, msg) {
+    const btn = document.getElementById('run-btn');
+    btn.disabled = on;
+    btn.textContent = on ? '⏳ Running...' : '▶ Run Analysis';
+    const area = document.getElementById('status-area');
+    const pb   = document.getElementById('progress-bar');
+    if (on) {
+        area.style.display = 'block';
+        pb.style.display   = 'block';
+        document.getElementById('progress-fill').style.width = '15%';
+    } else {
+        pb.style.display = 'none';
+    }
+}
+
+function showStatus(type, html) {
+    const area = document.getElementById('status-area');
+    const box  = document.getElementById('status-box');
+    area.style.display = 'block';
+    box.className = 'status-box ' + (type === 'running' ? 'running' : type === 'done' ? 'done' : 'error');
+    box.innerHTML  = html;
+}
+
+function showError(msg) {
+    showStatus('error', '❌ Error: ' + escHtml(msg));
+}
+
+// ── Load History on page load ─────────────────────────────────────────────
+function loadHistory() {
+    fetch('/actions/pattern_history.php')
+        .then(r => r.json())
+        .then(data => {
+            const rows = data.history || [];
+            renderHistory(rows);
+        })
+        .catch(() => {});
+}
+
+function renderHistory(rows) {
+    const tbody  = document.getElementById('history-tbody');
+    const empty  = document.getElementById('history-empty');
+    const table  = document.getElementById('history-table-wrap');
+    const count  = document.getElementById('history-count');
+
+    if (!rows.length) {
+        empty.style.display = 'block';
+        table.style.display = 'none';
+        return;
+    }
+    empty.style.display = 'none';
+    table.style.display = 'block';
+
+    tbody.innerHTML = rows.map(r => {
+        const tfs     = escHtml(r.timeframes || '');
+        const best    = escHtml(r.best_strategy || '—');
+        const wr      = r.best_wr   ? r.best_wr.toFixed(1)  + '%' : '—';
+        const pips    = r.best_pips != null ? (r.best_pips >= 0 ? '+' : '') + r.best_pips.toFixed(1) : '—';
+        const pf      = r.best_pf   ? r.best_pf.toFixed(2)          : '—';
+        const pipCol  = r.best_pips >= 0 ? '#10b981' : '#ef4444';
+        const date    = escHtml(r.created_at || '');
+
+        return `<tr id="hist-row-${escHtml(r.pattern_id)}">
+            <td><strong>${escHtml(r.pair)}</strong></td>
+            <td style="font-size:.78rem;color:var(--text-muted)">${tfs}</td>
+            <td style="text-align:center">${r.min_win_rate}%</td>
+            <td style="text-align:center">${r.total_tested}</td>
+            <td style="text-align:center;color:#f59e0b;font-weight:600">${r.total_winners}</td>
+            <td style="text-align:center;color:#10b981;font-weight:700">${r.total_profitable}</td>
+            <td style="font-size:.78rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${best}">${best}</td>
+            <td style="color:var(--primary);font-weight:600">${wr}</td>
+            <td style="color:${pipCol};font-weight:600">${pips}</td>
+            <td>${pf}</td>
+            <td style="font-size:.75rem;color:var(--text-muted)">${date}</td>
+            <td>
+                <button class="btn btn-sm btn-outline"
+                    style="color:#ef4444;border-color:#ef4444;padding:.2rem .6rem;font-size:.75rem"
+                    onclick="deleteHistory('${escHtml(r.pattern_id)}')">
+                    Delete
+                </button>
+            </td>
+        </tr>`;
+    }).join('');
+
+    count.textContent = `${rows.length} run(s) saved`;
+}
+
+function deleteHistory(discId) {
+    if (!confirm('এই Pattern result মুছে ফেলবেন?')) return;
+    const fd = new FormData();
+    fd.append('pattern_id', discId);
+    fetch('/actions/pattern_delete.php', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                const row = document.getElementById('hist-row-' + discId);
+                if (row) row.remove();
+                // Check if table is now empty
+                const tbody = document.getElementById('history-tbody');
+                if (!tbody.children.length) {
+                    document.getElementById('history-empty').style.display = 'block';
+                    document.getElementById('history-table-wrap').style.display = 'none';
+                }
+            } else {
+                alert('Delete failed: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(e => alert('Error: ' + e.message));
+}
+
+// Reload history after discovery completes
+const _origDisplayResults = displayResults;
+displayResults = function(results, meta) {
+    _origDisplayResults(results, meta);
+    setTimeout(loadHistory, 1000); // refresh history after 1s
+};
+
+// Load history on page load
+loadHistory();
+</script>
+
+<!-- ── Pattern History Section ──────────────────────────────────────── -->
+<div class="card" style="margin-top:1.5rem">
+    <div class="card-header">
+        <h2>Pattern History</h2>
+        <span id="history-count" style="font-size:.8rem;color:var(--text-muted)"></span>
+    </div>
+    <div class="card-body">
+
+        <div id="history-empty" style="text-align:center;padding:2rem;color:var(--text-muted);display:none">
+            No discovery runs saved yet. Run a discovery to see results here.
+        </div>
+
+        <div id="history-table-wrap" style="display:none;overflow-x:auto">
+            <table class="table" id="history-table">
+                <thead>
+                    <tr>
+                        <th>Pair</th>
+                        <th>Timeframes</th>
+                        <th>Min WR</th>
+                        <th>Tested</th>
+                        <th>Winners</th>
+                        <th>Profitable</th>
+                        <th>Best Strategy</th>
+                        <th>Best WR%</th>
+                        <th>Best Pips</th>
+                        <th>Best PF</th>
+                        <th>Date</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="history-tbody"></tbody>
+            </table>
+            <div id="history-count" style="font-size:.8rem;color:var(--text-muted);padding:.4rem 0"></div>
+        </div>
+
+    </div>
+</div>
+
+<?php require_once __DIR__ . '/../includes/footer.php'; ?>
