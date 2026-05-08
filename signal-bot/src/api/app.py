@@ -32,6 +32,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 from utils.logger import setup_logger
+from utils.pair_config import get_pair_config as _pair_cfg
 
 logger = setup_logger('api')
 
@@ -161,12 +162,13 @@ def create_app(db, config) -> Flask:
         else:
             pip_diff = entry_price - close_price
 
-        pip_size = 0.01 if 'JPY' in signal['pair'] else 0.0001
-        if 'XAU' in signal['pair']:
-            pip_size = 0.1
+        # Centralized pair config — single source of truth
+        _pair = signal['pair']
+        _cfg = _pair_cfg(_pair)
+        pip_size  = _cfg['pip_size']
+        pip_value = _cfg['pip_value']
 
         actual_pips   = round(pip_diff / pip_size, 1)
-        pip_value     = 10.0  # Simplified
         actual_profit = round(float(signal.get('suggested_lot') or 0.01) * actual_pips * pip_value, 2)
 
         from datetime import datetime, timezone
@@ -898,6 +900,41 @@ def create_app(db, config) -> Flask:
         from data.market_data_cache import get_cache_info
         info = get_cache_info()
         return ok({'files': info, 'total': len(info), 'refresh': _data_refresh_status})
+
+    # ── Trading Modes ────────────────────────────────────────────────────────
+
+    @app.route('/api/trading-modes')
+    @require_api_key
+    def trading_modes_status():
+        """Return config and recent signal counts for all 5 trading modes."""
+        from signals.trading_modes import TRADING_MODES
+
+        modes_info = []
+        for mode in TRADING_MODES:
+            # Count signals sent by this mode in last 24h
+            try:
+                row = db.execute_one(
+                    "SELECT COUNT(*) as cnt FROM signals "
+                    "WHERE mode = :p0 AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)",
+                    (mode['name'],)
+                )
+                signals_24h = row['cnt'] if row else 0
+            except Exception:
+                signals_24h = 0
+
+            modes_info.append({
+                'id':         mode['id'],
+                'name':       mode['name'],
+                'label':      mode['label'],
+                'pattern':    mode['pattern'],
+                'filter':     mode['filter'],
+                'timeframes': mode['timeframes'],
+                'direction':  mode['direction'],
+                'stats':      mode['stats'],
+                'signals_24h': signals_24h,
+            })
+
+        return ok({'modes': modes_info, 'total': len(modes_info)})
 
     # ── Health check (no auth) ────────────────────────────────────────────
 

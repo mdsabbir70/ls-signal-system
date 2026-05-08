@@ -1,40 +1,29 @@
 """
-Economic Calendar Integration
+Economic Calendar — Multi-Source
 
-Fetches real-time economic events from multiple sources and provides:
-  - High-impact event detection (NFP, FOMC, ECB, BOE, etc.)
-  - Trading session awareness (London, New York, Tokyo, Sydney)
-  - Pre-event trade blocking (configurable window)
-  - Post-event bias adjustment (actual vs forecast)
+Sources (priority order):
+  1. Finnhub /calendar/economic — free, real-time, round-robin keys
+  2. ForexFactory thisweek JSON — free, works (nextweek sometimes 404s)
+  3. DB cache — fallback if all APIs fail
 
-Sources:
-  - ForexFactory via nfs.faireconomy.media JSON endpoint
-  - Fallback: scrape investing.com calendar
-
-Usage:
-    calendar = EconomicCalendar(db)
-    await calendar.fetch_events()
-    gate = calendar.check_gate('EURUSD', minutes_before=30)
+Data saved to economic_events table every fetch.
+Cache TTL: 30 minutes in memory.
 """
 
 from __future__ import annotations
 import asyncio
+import json
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict
-import json
-
 import requests
+
 from utils.logger import setup_logger
 
 logger = setup_logger('econ_calendar')
 
-# Bangladesh Standard Time
 BDT = timezone(timedelta(hours=6))
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  CURRENCY → PAIR MAPPING
-# ═════════════════════════════════════════════════════════════════════════════
+# ── Currency / Pair mapping ──────────────────────────────────────────────────
 
 CURRENCY_TO_PAIRS = {
     'USD': ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD',
@@ -46,225 +35,294 @@ CURRENCY_TO_PAIRS = {
     'CAD': ['USDCAD'],
     'CHF': ['USDCHF'],
     'NZD': ['NZDUSD'],
-    'CNY': ['BTCUSDT', 'ETHUSDT'],  # China news affects crypto
+    'CNY': ['BTCUSDT', 'ETHUSDT'],
 }
 
+# Finnhub country code → currency mapping
+COUNTRY_TO_CURRENCY = {
+    'US': 'USD', 'EU': 'EUR', 'DE': 'EUR', 'FR': 'EUR', 'IT': 'EUR',
+    'ES': 'EUR', 'PT': 'EUR', 'NL': 'EUR', 'BE': 'EUR', 'AT': 'EUR',
+    'FI': 'EUR', 'GR': 'EUR', 'IE': 'EUR', 'LU': 'EUR', 'SK': 'EUR',
+    'GB': 'GBP', 'UK': 'GBP',
+    'JP': 'JPY',
+    'AU': 'AUD',
+    'CA': 'CAD',
+    'CH': 'CHF',
+    'NZ': 'NZD',
+    'CN': 'CNY',
+}
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  TRADING SESSIONS (UTC)
-# ═════════════════════════════════════════════════════════════════════════════
+# ForexFactory country field → currency
+FF_COUNTRY_CURRENCY = {
+    'USD': 'USD', 'EUR': 'EUR', 'GBP': 'GBP', 'JPY': 'JPY',
+    'AUD': 'AUD', 'CAD': 'CAD', 'CHF': 'CHF', 'NZD': 'NZD', 'CNY': 'CNY',
+}
+
+HIGH_IMPACT_KEYWORDS = [
+    'Non-Farm', 'NFP', 'Non Farm', 'Payroll',
+    'Interest Rate', 'Rate Decision',
+    'FOMC', 'Fed Chair', 'Federal Funds',
+    'ECB Press', 'ECB Rate',
+    'BOE Rate', 'BOJ Rate',
+    'CPI', 'Core CPI', 'Inflation Rate',
+    'GDP', 'Gross Domestic',
+    'Unemployment Rate',
+    'Retail Sales',
+    'PMI',
+    'Core PCE',
+    'Monetary Policy',
+    'Jackson Hole',
+    'Balance of Trade', 'Trade Balance',
+    'Michigan Consumer',
+]
 
 SESSIONS = {
-    'tokyo':  {'open': 0, 'close': 9,  'pairs': ['USDJPY', 'EURJPY', 'GBPJPY', 'AUDJPY', 'AUDUSD']},
-    'london': {'open': 7, 'close': 16, 'pairs': ['EURUSD', 'GBPUSD', 'EURGBP', 'USDCHF', 'XAUUSD']},
+    'tokyo':    {'open': 0,  'close': 9,  'pairs': ['USDJPY', 'EURJPY', 'GBPJPY', 'AUDJPY', 'AUDUSD']},
+    'london':   {'open': 7,  'close': 16, 'pairs': ['EURUSD', 'GBPUSD', 'EURGBP', 'USDCHF', 'XAUUSD']},
     'new_york': {'open': 13, 'close': 22, 'pairs': ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCAD', 'XAUUSD']},
-    'sydney': {'open': 22, 'close': 7,  'pairs': ['AUDUSD', 'NZDUSD', 'AUDJPY']},
+    'sydney':   {'open': 22, 'close': 7,  'pairs': ['AUDUSD', 'NZDUSD', 'AUDJPY']},
 }
 
-# Crypto trades 24/7 — all sessions
 CRYPTO_PAIRS = {'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'TONUSDT',
                 'DOGEUSDT', 'BNBUSDT', 'PEPEUSDT', 'ADAUSDT', 'HYPEUSDT',
                 'LINKUSDT', 'SUIUSDT', 'DOTUSDT'}
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  HIGH-IMPACT EVENT KEYWORDS
-# ═════════════════════════════════════════════════════════════════════════════
-
-HIGH_IMPACT_KEYWORDS = [
-    'Non-Farm', 'NFP', 'Interest Rate', 'Rate Decision',
-    'FOMC', 'Fed Chair', 'ECB Press', 'BOE Rate', 'BOJ Rate',
-    'CPI', 'GDP', 'Unemployment Rate', 'Retail Sales',
-    'PMI', 'Core PCE', 'Federal Funds', 'Monetary Policy',
-    'Jackson Hole', 'Inflation Rate',
-]
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  ECONOMIC CALENDAR
-# ═════════════════════════════════════════════════════════════════════════════
-
 class EconomicCalendar:
     """Fetches and manages economic calendar events."""
 
-    URLS = [
-        'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
-        'https://nfs.faireconomy.media/ff_calendar_nextweek.json',
-    ]
-    CACHE_TTL = 1800    # 30 min cache
+    CACHE_TTL = 1800  # 30 minutes
 
     def __init__(self, db=None):
         self.db = db
         self._events: List[dict] = []
         self._last_fetch: Optional[datetime] = None
 
+    # ── Public API ────────────────────────────────────────────────────────────
+
     async def fetch_events(self) -> List[dict]:
-        """Fetch this + next week's economic events. Caches for 30 min."""
+        """Fetch events. Cache 30 min. Sources: Finnhub → ForexFactory → DB."""
         now = datetime.now(timezone.utc)
         if (self._last_fetch and
                 (now - self._last_fetch).total_seconds() < self.CACHE_TTL and
                 self._events):
             return self._events
 
+        loop = asyncio.get_event_loop()
+        events = await loop.run_in_executor(None, self._fetch_all)
+
+        if events:
+            self._events = events
+            self._last_fetch = now
+            high = sum(1 for e in events if e.get('is_high_impact'))
+            logger.info(f"Economic calendar: {len(events)} events ({high} high-impact)")
+            if self.db:
+                await loop.run_in_executor(None, self._save_to_db, events)
+        else:
+            # All APIs failed — load from DB
+            db_events = await loop.run_in_executor(None, self._load_from_db)
+            if db_events:
+                self._events = db_events
+                logger.info(f"Calendar: loaded {len(db_events)} events from DB (API fallback)")
+
+        return self._events
+
+    # ── Fetch Sources ─────────────────────────────────────────────────────────
+
+    def _fetch_all(self) -> List[dict]:
+        """Try sources in order: Finnhub → ForexFactory."""
+        # Source 1: Finnhub
+        events = self._fetch_finnhub()
+        if len(events) >= 5:
+            return events
+
+        # Source 2: ForexFactory thisweek
+        logger.info("Finnhub calendar failed/empty, trying ForexFactory...")
+        events = self._fetch_forexfactory()
+        if events:
+            return events
+
+        logger.warning("All calendar sources failed — will use DB cache")
+        return []
+
+    def _fetch_finnhub(self) -> List[dict]:
+        """Fetch from Finnhub /calendar/economic (free, 700+ events/2 weeks)."""
         try:
-            loop = asyncio.get_event_loop()
-            events = await loop.run_in_executor(None, self._fetch_ff)
-            if events:
-                self._events = events
-                self._last_fetch = now
-                high_count = sum(1 for e in events if e.get('is_high_impact'))
-                logger.info(f"Fetched {len(events)} economic events ({high_count} high-impact)")
+            from data.market_data_cache import _get_finnhub_key
+            api_key = _get_finnhub_key()
+            if not api_key:
+                logger.warning("No Finnhub API key available for calendar")
+                return []
 
-                # Save to DB if available
-                if self.db:
-                    await loop.run_in_executor(None, self._save_to_db, events)
+            now       = datetime.now(timezone.utc)
+            date_from = now.strftime('%Y-%m-%d')
+            date_to   = (now + timedelta(days=14)).strftime('%Y-%m-%d')
 
-                return events
+            url = (f"https://finnhub.io/api/v1/calendar/economic"
+                   f"?from={date_from}&to={date_to}&token={api_key}")
+
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+            resp.raise_for_status()
+
+            data = resp.json()
+            raw_events = data.get('economicCalendar', [])
+            if not raw_events:
+                logger.warning("Finnhub calendar: empty economicCalendar")
+                return []
+
+            events = []
+            for ev in raw_events:
+                title    = ev.get('event', '')
+                country  = ev.get('country', '')
+                currency = COUNTRY_TO_CURRENCY.get(country, '')
+                if not currency:
+                    continue  # Skip events with unknown currency
+
+                impact = str(ev.get('impact', 'low')).lower()
+                time_str = ev.get('time', '')
+
+                try:
+                    dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                except (ValueError, AttributeError):
+                    continue
+
+                is_high = (impact == 'high') or any(
+                    kw.lower() in title.lower() for kw in HIGH_IMPACT_KEYWORDS
+                )
+
+                # Finnhub returns numbers for actual/estimate/prev
+                actual   = str(ev['actual'])   if ev.get('actual')   is not None else ''
+                forecast = str(ev['estimate']) if ev.get('estimate') is not None else ''
+                previous = str(ev['prev'])     if ev.get('prev')     is not None else ''
+
+                events.append({
+                    'title':          title,
+                    'country':        country,
+                    'currency':       currency,
+                    'datetime':       dt,
+                    'impact':         impact,
+                    'forecast':       forecast,
+                    'previous':       previous,
+                    'actual':         actual,
+                    'is_high_impact': is_high,
+                    'affected_pairs': CURRENCY_TO_PAIRS.get(currency, []),
+                    'source':         'finnhub',
+                })
+
+            logger.info(f"Finnhub calendar: {len(events)} events fetched")
+            return events
+
         except Exception as e:
-            logger.error(f"Failed to fetch economic calendar: {e}")
+            logger.error(f"Finnhub calendar error: {e}")
+            return []
 
-        # Fallback: load from DB if API fails and no cache
-        if not self._events and self.db:
-            try:
-                loop = asyncio.get_event_loop()
-                db_events = await loop.run_in_executor(None, self._load_from_db)
-                if db_events:
-                    self._events = db_events
-                    logger.info(f"Loaded {len(db_events)} events from DB (API fallback)")
-            except Exception as e:
-                logger.warning(f"DB fallback load failed: {e}")
-
-        return self._events  # Return cached if fetch fails
-
-    def _fetch_ff(self) -> List[dict]:
-        """Fetch from ForexFactory JSON endpoint (this week + next week)."""
-        all_events = []
-        for url in self.URLS:
-            try:
-                events = self._fetch_one_url(url)
-                all_events.extend(events)
-            except Exception as e:
-                logger.warning(f"Fetch failed for {url}: {e}")
-
-        # Deduplicate by title + datetime
-        seen = set()
-        unique = []
-        for ev in all_events:
-            key = (ev.get('title', ''), str(ev.get('datetime', '')))
-            if key not in seen:
-                seen.add(key)
-                unique.append(ev)
-
-        return unique
-
-    def _fetch_one_url(self, url: str) -> List[dict]:
-        """Fetch events from a single ForexFactory JSON URL."""
+    def _fetch_forexfactory(self) -> List[dict]:
+        """Fetch from ForexFactory thisweek JSON (nextweek skipped — often 404)."""
+        url = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json'
         try:
-            resp = requests.get(
-                url,
-                headers={'User-Agent': 'Mozilla/5.0'},
-                timeout=10,
-            )
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
             resp.raise_for_status()
             raw_events = resp.json()
 
             events = []
             for ev in raw_events:
-                event = {
-                    'title': ev.get('title', ''),
-                    'country': ev.get('country', ''),
-                    'date': ev.get('date', ''),
-                    'impact': ev.get('impact', 'Low'),
-                    'forecast': ev.get('forecast', ''),
-                    'previous': ev.get('previous', ''),
-                    'actual': ev.get('actual', ''),
-                }
+                title    = ev.get('title', '')
+                country  = ev.get('country', '')
+                currency = FF_COUNTRY_CURRENCY.get(country, country)
+                impact   = str(ev.get('impact', 'Low'))
 
-                # Parse date
                 try:
-                    event['datetime'] = datetime.fromisoformat(
-                        event['date'].replace('Z', '+00:00')
-                    )
+                    dt = datetime.fromisoformat(ev.get('date', '').replace('Z', '+00:00'))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
                 except (ValueError, AttributeError):
-                    event['datetime'] = None
+                    continue
 
-                # Determine currency
-                country_map = {
-                    'USD': 'USD', 'EUR': 'EUR', 'GBP': 'GBP', 'JPY': 'JPY',
-                    'AUD': 'AUD', 'CAD': 'CAD', 'CHF': 'CHF', 'NZD': 'NZD',
-                    'CNY': 'CNY',
-                }
-                event['currency'] = country_map.get(event['country'], event['country'])
-
-                # Determine if high impact
-                impact_str = str(event['impact']).lower()
-                is_high = impact_str in ('high', 'holiday')
-                if not is_high:
-                    is_high = any(kw.lower() in event['title'].lower()
-                                 for kw in HIGH_IMPACT_KEYWORDS)
-                event['is_high_impact'] = is_high
-
-                # Affected pairs
-                event['affected_pairs'] = CURRENCY_TO_PAIRS.get(
-                    event['currency'], []
+                is_high = (impact.lower() in ('high', 'holiday')) or any(
+                    kw.lower() in title.lower() for kw in HIGH_IMPACT_KEYWORDS
                 )
 
-                events.append(event)
+                events.append({
+                    'title':          title,
+                    'country':        country,
+                    'currency':       currency,
+                    'datetime':       dt,
+                    'impact':         impact.lower(),
+                    'forecast':       ev.get('forecast', ''),
+                    'previous':       ev.get('previous', ''),
+                    'actual':         ev.get('actual', ''),
+                    'is_high_impact': is_high,
+                    'affected_pairs': CURRENCY_TO_PAIRS.get(currency, []),
+                    'source':         'forexfactory',
+                })
 
+            logger.info(f"ForexFactory: {len(events)} events fetched")
             return events
 
         except Exception as e:
-            logger.error(f"ForexFactory fetch error: {e}")
+            logger.error(f"ForexFactory error: {e}")
             return []
 
+    # ── DB Save / Load ────────────────────────────────────────────────────────
+
     def _save_to_db(self, events: List[dict]):
-        """Save events to economic_events table."""
+        """Upsert events into economic_events table."""
+        if not self.db:
+            return
         try:
             raw_conn = self.db.engine.raw_connection()
-            cursor = raw_conn.cursor()
-
+            cursor   = raw_conn.cursor()
+            saved = 0
             for ev in events:
                 if not ev.get('datetime'):
                     continue
-                cursor.execute(
-                    """INSERT INTO economic_events
-                       (event_title, currency, event_time, impact_level,
-                        forecast_value, previous_value, actual_value,
-                        affected_pairs)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                       ON DUPLICATE KEY UPDATE
-                        actual_value = VALUES(actual_value),
-                        impact_level = VALUES(impact_level)""",
-                    (
-                        ev['title'][:200],
-                        ev['currency'],
-                        ev['datetime'],
-                        'high' if ev['is_high_impact'] else ev['impact'].lower(),
-                        ev.get('forecast', '')[:50],
-                        ev.get('previous', '')[:50],
-                        ev.get('actual', '')[:50],
-                        json.dumps(ev['affected_pairs']),
+                try:
+                    cursor.execute(
+                        """INSERT INTO economic_events
+                           (event_title, currency, event_time, impact_level,
+                            forecast_value, previous_value, actual_value, affected_pairs)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                           ON DUPLICATE KEY UPDATE
+                             actual_value   = VALUES(actual_value),
+                             impact_level   = VALUES(impact_level),
+                             forecast_value = VALUES(forecast_value)""",
+                        (
+                            ev['title'][:200],
+                            ev['currency'],
+                            ev['datetime'],
+                            'high' if ev['is_high_impact'] else ev['impact'],
+                            ev.get('forecast', '')[:50],
+                            ev.get('previous', '')[:50],
+                            ev.get('actual', '')[:50],
+                            json.dumps(ev['affected_pairs']),
+                        )
                     )
-                )
+                    saved += 1
+                except Exception:
+                    pass
             raw_conn.commit()
             cursor.close()
             raw_conn.close()
+            logger.info(f"Calendar: saved/updated {saved} events in DB")
         except Exception as e:
-            logger.warning(f"Failed to save events to DB: {e}")
+            logger.warning(f"Calendar DB save failed: {e}")
 
     def _load_from_db(self) -> List[dict]:
-        """Load upcoming events from DB (fallback when API is down)."""
+        """Load upcoming events from DB (fallback when all APIs fail)."""
+        if not self.db:
+            return []
         try:
             raw_conn = self.db.engine.raw_connection()
-            cursor = raw_conn.cursor()
+            cursor   = raw_conn.cursor()
             cursor.execute(
                 """SELECT event_title, currency, event_time, impact_level,
-                          forecast_value, previous_value, actual_value,
-                          affected_pairs
+                          forecast_value, previous_value, actual_value, affected_pairs
                    FROM economic_events
-                   WHERE event_time >= NOW() - INTERVAL 1 HOUR
+                   WHERE event_time >= NOW() - INTERVAL 2 HOUR
                    ORDER BY event_time ASC
-                   LIMIT 200"""
+                   LIMIT 500"""
             )
             rows = cursor.fetchall()
             cursor.close()
@@ -279,84 +337,55 @@ class EconomicCalendar:
                 except (json.JSONDecodeError, TypeError):
                     affected = CURRENCY_TO_PAIRS.get(currency, [])
 
+                dt = event_time
+                if dt and dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+
                 events.append({
-                    'title': title,
-                    'currency': currency,
-                    'datetime': event_time.replace(tzinfo=timezone.utc) if event_time.tzinfo is None else event_time,
-                    'impact': impact,
-                    'forecast': forecast or '',
-                    'previous': prev or '',
-                    'actual': actual or '',
-                    'is_high_impact': is_high,
-                    'affected_pairs': affected,
+                    'title': title, 'currency': currency, 'datetime': dt,
+                    'impact': impact, 'forecast': forecast or '',
+                    'previous': prev or '', 'actual': actual or '',
+                    'is_high_impact': is_high, 'affected_pairs': affected,
+                    'source': 'db',
                 })
             return events
         except Exception as e:
-            logger.warning(f"Failed to load events from DB: {e}")
+            logger.warning(f"Calendar DB load failed: {e}")
             return []
 
-    # ── Gate Logic ────────────────────────────────────────────────────────
+    # ── Gate / Signal Logic ───────────────────────────────────────────────────
 
-    def check_gate(
-        self,
-        pair: str,
-        minutes_before: int = 30,
-        minutes_after: int = 15,
-    ) -> Dict:
-        """
-        Check if trading should be blocked due to upcoming/recent events.
-
-        Returns:
-            {
-                'action': 'BLOCK' | 'CAUTION' | 'CLEAR',
-                'reason': str,
-                'event': dict or None,
-                'minutes_until': int or None,
-            }
-        """
+    def check_gate(self, pair: str, minutes_before: int = 30,
+                   minutes_after: int = 15) -> Dict:
+        """Block/caution trading around high-impact events."""
         now = datetime.now(timezone.utc)
-
         for ev in self._events:
             if not ev.get('datetime') or not ev.get('is_high_impact'):
                 continue
-
-            # Check if this event affects the pair
             if pair not in ev.get('affected_pairs', []):
                 continue
-
             ev_time = ev['datetime']
             if ev_time.tzinfo is None:
                 ev_time = ev_time.replace(tzinfo=timezone.utc)
-
-            diff = (ev_time - now).total_seconds() / 60  # Minutes until event
-
-            # Event is in the future, within blocking window
+            diff = (ev_time - now).total_seconds() / 60
             if 0 < diff <= minutes_before:
                 return {
                     'action': 'BLOCK',
-                    'reason': f"High-impact event in {int(diff)}min: {ev['title']} ({ev['currency']})",
-                    'event': ev,
-                    'minutes_until': int(diff),
+                    'reason': f"High-impact in {int(diff)}min: {ev['title']} ({ev['currency']})",
+                    'event': ev, 'minutes_until': int(diff),
                 }
-
-            # Event just happened (within after-window)
             if -minutes_after <= diff <= 0:
                 return {
                     'action': 'CAUTION',
-                    'reason': f"High-impact event {int(abs(diff))}min ago: {ev['title']}",
-                    'event': ev,
-                    'minutes_until': int(diff),
+                    'reason': f"High-impact {int(abs(diff))}min ago: {ev['title']}",
+                    'event': ev, 'minutes_until': int(diff),
                 }
-
-            # Event coming within 2 hours — caution
-            if 0 < diff <= 120 and ev['is_high_impact']:
+            if 0 < diff <= 120:
                 return {
                     'action': 'CAUTION',
-                    'reason': f"High-impact event in {int(diff)}min: {ev['title']}",
-                    'event': ev,
-                    'minutes_until': int(diff),
+                    'reason': f"High-impact in {int(diff)}min: {ev['title']}",
+                    'event': ev, 'minutes_until': int(diff),
                 }
-
         return {'action': 'CLEAR', 'reason': '', 'event': None, 'minutes_until': None}
 
     def get_upcoming(self, hours: int = 24, high_only: bool = True) -> List[dict]:
@@ -364,7 +393,6 @@ class EconomicCalendar:
         now = datetime.now(timezone.utc)
         cutoff = now + timedelta(hours=hours)
         result = []
-
         for ev in self._events:
             if not ev.get('datetime'):
                 continue
@@ -375,92 +403,67 @@ class EconomicCalendar:
                 if high_only and not ev.get('is_high_impact'):
                     continue
                 result.append(ev)
-
         return sorted(result, key=lambda e: e['datetime'])
 
     def get_event_bias(self, pair: str) -> Dict:
-        """
-        Check recent events for bias — if actual > forecast, that's
-        positive for the currency (hawkish/strong).
-
-        Returns:
-            {'bias': 'bullish'|'bearish'|'neutral', 'reason': str, 'strength': 0-1}
-        """
+        """Check recent events for directional bias (actual vs forecast)."""
         now = datetime.now(timezone.utc)
-        recent_window = timedelta(hours=4)
-
+        recent = timedelta(hours=4)
         for ev in self._events:
             if not ev.get('datetime') or not ev.get('is_high_impact'):
                 continue
             if pair not in ev.get('affected_pairs', []):
                 continue
-
             ev_time = ev['datetime']
             if ev_time.tzinfo is None:
                 ev_time = ev_time.replace(tzinfo=timezone.utc)
-
-            # Only look at events that already happened in the last 4 hours
-            if not (now - recent_window <= ev_time <= now):
+            if not (now - recent <= ev_time <= now):
                 continue
-
-            actual = ev.get('actual', '')
+            actual   = ev.get('actual', '')
             forecast = ev.get('forecast', '')
             if not actual or not forecast:
                 continue
-
             try:
-                act_val = float(actual.replace('%', '').replace('K', '000').replace('M', '000000').strip())
-                fcast_val = float(forecast.replace('%', '').replace('K', '000').replace('M', '000000').strip())
+                act_v   = float(str(actual).replace('%', '').replace('K', '000')
+                                .replace('M', '000000').strip())
+                fcast_v = float(str(forecast).replace('%', '').replace('K', '000')
+                                .replace('M', '000000').strip())
             except (ValueError, AttributeError):
                 continue
-
-            diff_pct = (act_val - fcast_val) / abs(fcast_val) if fcast_val != 0 else 0
-            currency = ev['currency']
-
-            # Determine if the pair's base or quote is the event currency
-            is_base = pair.startswith(currency)
-            is_quote = pair[3:6] == currency if len(pair) >= 6 else False
-
+            diff_pct = (act_v - fcast_v) / abs(fcast_v) if fcast_v != 0 else 0
             if abs(diff_pct) < 0.01:
-                continue  # Negligible difference
-
+                continue
+            currency = ev['currency']
+            is_base  = pair.startswith(currency)
+            is_quote = pair[3:6] == currency if len(pair) >= 6 else False
+            reason   = f"{ev['title']}: actual={actual} vs forecast={forecast}"
             if diff_pct > 0:
-                # Actual better than forecast = currency strong
-                if is_base:
-                    return {'bias': 'bullish', 'reason': f"{ev['title']}: actual > forecast ({actual} vs {forecast})", 'strength': min(1.0, abs(diff_pct))}
-                elif is_quote:
-                    return {'bias': 'bearish', 'reason': f"{ev['title']}: actual > forecast ({actual} vs {forecast})", 'strength': min(1.0, abs(diff_pct))}
+                if is_base:  return {'bias': 'bullish', 'reason': reason, 'strength': min(1.0, abs(diff_pct))}
+                if is_quote: return {'bias': 'bearish', 'reason': reason, 'strength': min(1.0, abs(diff_pct))}
             else:
-                # Actual worse than forecast = currency weak
-                if is_base:
-                    return {'bias': 'bearish', 'reason': f"{ev['title']}: actual < forecast ({actual} vs {forecast})", 'strength': min(1.0, abs(diff_pct))}
-                elif is_quote:
-                    return {'bias': 'bullish', 'reason': f"{ev['title']}: actual < forecast ({actual} vs {forecast})", 'strength': min(1.0, abs(diff_pct))}
-
+                if is_base:  return {'bias': 'bearish', 'reason': reason, 'strength': min(1.0, abs(diff_pct))}
+                if is_quote: return {'bias': 'bullish', 'reason': reason, 'strength': min(1.0, abs(diff_pct))}
         return {'bias': 'neutral', 'reason': '', 'strength': 0.0}
 
-    # ── Session Logic ─────────────────────────────────────────────────────
+    # ── Session Helpers ───────────────────────────────────────────────────────
 
     @staticmethod
     def get_active_sessions() -> List[str]:
-        """Get currently active trading sessions."""
         hour = datetime.now(timezone.utc).hour
         active = []
         for name, sess in SESSIONS.items():
             if sess['open'] < sess['close']:
                 if sess['open'] <= hour < sess['close']:
                     active.append(name)
-            else:  # Wraps midnight (sydney)
+            else:
                 if hour >= sess['open'] or hour < sess['close']:
                     active.append(name)
         return active
 
     @staticmethod
     def is_session_optimal(pair: str) -> bool:
-        """Check if the current session is optimal for this pair."""
         if pair in CRYPTO_PAIRS:
-            return True  # Crypto trades 24/7
-
+            return True
         hour = datetime.now(timezone.utc).hour
         for name, sess in SESSIONS.items():
             if pair in sess['pairs']:
@@ -474,17 +477,13 @@ class EconomicCalendar:
 
     @staticmethod
     def get_session_info(pair: str) -> Dict:
-        """Get session context for a pair."""
-        active = EconomicCalendar.get_active_sessions()
+        active  = EconomicCalendar.get_active_sessions()
         optimal = EconomicCalendar.is_session_optimal(pair)
-        hour = datetime.now(timezone.utc).hour
-
-        # London-NY overlap (13:00-16:00 UTC) = highest volatility
+        hour    = datetime.now(timezone.utc).hour
         overlap = 13 <= hour < 16
-
         return {
-            'active_sessions': active,
-            'is_optimal': optimal,
-            'london_ny_overlap': overlap,
+            'active_sessions':     active,
+            'is_optimal':          optimal,
+            'london_ny_overlap':   overlap,
             'volatility_expected': 'high' if overlap else ('medium' if active else 'low'),
         }

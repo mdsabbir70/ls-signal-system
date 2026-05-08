@@ -12,6 +12,7 @@ Messages:
 from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone, timedelta
+from utils.pair_config import price_fmt as _cfg_price_fmt
 
 # Bangladesh Standard Time (UTC+6)
 BDT = timezone(timedelta(hours=6), 'BDT')
@@ -88,6 +89,13 @@ class TelegramNotifier:
         msg = self._format_monthly_summary(stats)
         return await self._send(msg)
 
+    async def send_pattern_signal(self, signal: dict) -> Optional[int]:
+        """Send pattern-mode signal with trading mode label."""
+        if not self._bot:
+            return None
+        msg = self._format_pattern_signal(signal)
+        return await self._send(msg)
+
     async def send_error(self, message: str) -> Optional[int]:
         """Send error alert."""
         if not self._bot:
@@ -114,10 +122,18 @@ class TelegramNotifier:
 
     # ── Message formatters ─────────────────────────────────────────────────
 
+
     @staticmethod
     def _esc(text) -> str:
         """Escape HTML special characters."""
         return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    @staticmethod
+    def _price_fmt(price: float, pair: str) -> str:
+        """Format price — delegates to centralized pair_config."""
+        return _cfg_price_fmt(price, pair)
+
+
 
     @classmethod
     def _format_signal(cls, signal: dict) -> str:
@@ -139,9 +155,9 @@ class TelegramNotifier:
             f"💡 <b>Mode:</b> {cls._esc(signal.get('mode', 'hybrid').upper())}",
             f"🎯 <b>Confluence Score:</b> {score:.1f}/100 ({quality})",
             f"",
-            f"📈 <b>Entry:</b> <code>{signal.get('entry_price', 0):.5f}</code>",
-            f"🛑 <b>Stop Loss:</b> <code>{signal.get('stop_loss', 0):.5f}</code> ({signal.get('sl_pips', 0):.0f} pips)",
-            f"✅ <b>Take Profit:</b> <code>{signal.get('take_profit', 0):.5f}</code> ({signal.get('tp_pips', 0):.0f} pips)",
+            f"📈 <b>Entry:</b> <code>{cls._price_fmt(signal.get('entry_price', 0), signal.get('pair', ''))}</code>",
+            f"🛑 <b>Stop Loss:</b> <code>{cls._price_fmt(signal.get('stop_loss', 0), signal.get('pair', ''))}</code> ({signal.get('sl_pips', 0):.0f} pips)",
+            f"✅ <b>Take Profit:</b> <code>{cls._price_fmt(signal.get('take_profit', 0), signal.get('pair', ''))}</code> ({signal.get('tp_pips', 0):.0f} pips)",
             f"⚖️ <b>R:R Ratio:</b> 1:{signal.get('risk_reward_ratio', 0):.1f}",
             f"",
             f"📦 <b>Lot Size:</b> {signal.get('suggested_lot', 0):.2f}",
@@ -317,34 +333,115 @@ class TelegramNotifier:
         return "\n".join(lines)
 
     @classmethod
-    def _format_close(cls, signal: dict, close_data: dict) -> str:
-        status = close_data.get('status', '')
-        pair   = signal.get('pair', '')
-        actual_pips   = close_data.get('actual_pips', 0)
-        actual_profit = close_data.get('actual_profit', 0)
+    def _format_pattern_signal(cls, signal: dict) -> str:
+        """Format a pattern-mode signal with trading mode label header."""
+        direction   = signal['direction']
+        pair        = signal['pair']
+        mode_label  = signal.get('mode_label', signal.get('mode', 'Pattern'))
+        pattern     = signal.get('pattern', '')
+        filter_name = signal.get('filter_name', '')
+        tf          = signal.get('timeframe', '')
+        mode_stats  = signal.get('mode_stats', '')
 
-        if status == 'CLOSED_TP':
-            icon = '✅'
-            result = f"+{actual_pips:.0f} pips (+${actual_profit:.2f})"
-        elif status == 'CLOSED_SL':
-            icon = '🛑'
-            result = f"-{abs(actual_pips):.0f} pips (-${abs(actual_profit):.2f})"
-        else:
-            icon = '🔄'
-            result = f"{actual_pips:.0f} pips"
+        dir_emoji = '🟢' if direction == 'BUY' else '🔴'
 
         lines = [
-            f"{icon} <b>{cls._esc(pair)} Signal Closed</b>",
+            f"┌──────────────────────────────┐",
+            f"  {cls._esc(mode_label)}",
+            f"└──────────────────────────────┘",
             f"",
-            f"📊 <b>Signal:</b> <code>{cls._esc(signal.get('signal_id', 'N/A'))}</code>",
-            f"📌 <b>Result:</b> {cls._esc(result)}",
-            f"⏱ <b>Duration:</b> {close_data.get('duration_minutes', 0)} minutes",
-            f"🔚 <b>Close Price:</b> <code>{close_data.get('close_price', 0):.5f}</code>",
-            f"📝 <b>Reason:</b> {cls._esc(close_data.get('close_reason', status))}",
+            f"{dir_emoji} <b>{direction} {cls._esc(pair)}</b>",
+            f"",
+            f"📊 <b>Signal ID:</b> <code>{cls._esc(signal.get('signal_id', 'N/A'))}</code>",
+            f"🧩 <b>Pattern:</b> {cls._esc(pattern)}",
+            f"🔍 <b>Filter:</b> {cls._esc(filter_name)}",
+            f"🕐 <b>Timeframe:</b> {cls._esc(tf)}",
+        ]
+
+        if mode_stats:
+            lines.append(f"📈 <b>Backtest Stats:</b> {cls._esc(mode_stats)}")
+
+        # Score & quality
+        _score = signal.get('confluence_score', 0)
+        _qlabel = signal.get('quality_label', '')
+        if _score > 0:
+            _q_emoji = {'Strong': '🟢', 'Good': '🔵', 'Fair': '🟡', 'Weak': '🔴'}.get(_qlabel, '⚪')
+            lines.append(f"🎯 <b>Score:</b> {_score:.1f}/100 {_q_emoji} {cls._esc(_qlabel)}")
+
+        ez_low    = signal.get('entry_zone_low', 0)
+        ez_high   = signal.get('entry_zone_high', 0)
+        max_ent   = signal.get('max_entry', 0)
+        skip_note = "এর উপরে গেলে SKIP" if direction == 'BUY' else "এর নিচে গেলে SKIP"
+
+        lines.extend([
+            f"",
+            f"📍 <b>Entry:</b>       <code>{cls._price_fmt(signal.get('entry_price', 0), pair)}</code>",
+            f"📊 <b>Entry Zone:</b>  <code>{cls._price_fmt(ez_low, pair)}</code> – <code>{cls._price_fmt(ez_high, pair)}</code>",
+            f"🚫 <b>Max Entry:</b>   <code>{cls._price_fmt(max_ent, pair)}</code>  ← {skip_note}",
+            f"🛑 <b>Stop Loss:</b>   <code>{cls._price_fmt(signal.get('stop_loss', 0), pair)}</code>"
+            f" ({signal.get('sl_pips', 0):.0f} pips)",
+            f"✅ <b>Take Profit:</b>  <code>{cls._price_fmt(signal.get('take_profit', 0), pair)}</code>"
+            f" ({signal.get('tp_pips', 0):.0f} pips)",
+            f"⚖️ <b>R:R Ratio:</b>  1:{signal.get('risk_reward_ratio', 0):.1f}",
+            f"",
+            f"📦 <b>Lot Size:</b> {signal.get('suggested_lot', 0.01):.2f}",
+            f"💵 <b>Risk:</b> ${signal.get('risk_amount', 0):.2f}",
+            f"",
+            f"⏳ <b>Valid Until:</b>  {cls._esc(signal.get('valid_until_str', 'N/A'))} BDT",
+            f"⏰ <b>Signal Time:</b>  {datetime.now(BDT).strftime('%d %b %Y, %I:%M %p')} BDT",
+            f"",
+            f"⚠️ <i>Zone এর বাইরে price গেলে trade করবেন না।</i>",
+        ])
+
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_close(cls, signal: dict, close_data: dict) -> str:
+        status        = close_data.get('status', '')
+        pair          = signal.get('pair', '')
+        direction     = signal.get('direction', '')
+        mode          = cls._esc(signal.get('mode_label') or signal.get('mode') or 'Signal')
+        actual_pips   = close_data.get('actual_pips') or 0
+        actual_profit = close_data.get('actual_profit') or 0
+        duration      = close_data.get('duration_minutes', 0)
+        entry         = float(signal.get('entry_price', 0))
+        close_price   = float(close_data.get('close_price', 0))
+        dir_emoji     = '🟢' if direction == 'BUY' else '🔴'
+
+        if status == 'CLOSED_TP':
+            icon       = '✅'
+            result_txt = 'TAKE PROFIT হিট!'
+            pips_txt   = f"+{actual_pips:.0f} pips  (+${actual_profit:.2f})"
+        elif status == 'CLOSED_SL':
+            icon       = '🛑'
+            result_txt = 'STOP LOSS হিট!'
+            pips_txt   = f"-{abs(actual_pips):.0f} pips  (-${abs(actual_profit):.2f})"
+        else:
+            icon       = '🔄'
+            result_txt = 'Closed'
+            pips_txt   = f"{actual_pips:.0f} pips"
+
+        # Duration as hours/min
+        if duration >= 60:
+            dur_str = f"{duration // 60}h {duration % 60}m"
+        else:
+            dur_str = f"{duration}m"
+
+        lines = [
+            f"{icon} <b>{result_txt}</b>",
+            f"",
+            f"{dir_emoji} <b>{direction} {cls._esc(pair)}</b>  |  {mode}",
+            f"",
+            f"📍 <b>Entry:</b>        <code>{cls._price_fmt(entry, pair)}</code>",
+            f"🔚 <b>Close Price:</b>  <code>{cls._price_fmt(close_price, pair)}</code>",
+            f"",
+            f"💰 <b>Result:</b>  {cls._esc(pips_txt)}",
+            f"⏱ <b>Duration:</b> {cls._esc(dur_str)}",
             f"",
             f"⏰ {datetime.now(BDT).strftime('%d %b %Y, %I:%M %p')} BDT",
         ]
         return "\n".join(lines)
+
 
     @staticmethod
     def _format_daily_summary(stats: dict) -> str:
@@ -373,6 +470,7 @@ class TelegramNotifier:
             f"<i>signal.lstrading.xyz</i>",
         ]
         return "\n".join(lines)
+
 
     @staticmethod
     def _format_weekly_summary(stats: dict) -> str:
@@ -407,6 +505,7 @@ class TelegramNotifier:
             f"<i>signal.lstrading.xyz</i>",
         ]
         return "\n".join(lines)
+
 
     @staticmethod
     def _format_monthly_summary(stats: dict) -> str:

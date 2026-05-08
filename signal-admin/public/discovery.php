@@ -244,8 +244,9 @@ require_once __DIR__ . '/../includes/header.php';
                         <option value="price_action">Price Action</option>
                     </select>
                     <label style="font-size:.82rem;color:#1a1a1a;cursor:pointer"
-                           title="Only show strategies profitable in 2+ timeframes">
+                           title="২+ TF এ profitable strategies দেখায়। কাজ করতে হলে একাধিক TF select করে Run দিন।">
                         <input type="checkbox" id="filter-multitf"> Multi-TF only ★
+                        <span style="font-size:.68rem;color:#6b7280">(২+ TF select করুন)</span>
                     </label>
                     <label style="font-size:.82rem;color:#1a1a1a;margin-left:auto;cursor:pointer">
                         <input type="checkbox" id="filter-profitable" checked> Profitable only
@@ -417,8 +418,17 @@ function pollStatus() {
 }
 
 // ── Display Results ───────────────────────────────────────────────────────────
-function buildMultiTFMap(results) {
-    // key = strategy_name + '|' + params_label (same strategy, same params)
+function buildMultiTFMap(serverMap, results) {
+    // Prefer server-side map (covers ALL profitable, not just top 200)
+    if (serverMap && typeof serverMap === 'object') {
+        // Convert arrays back to Sets
+        const map = {};
+        for (const [key, tfs] of Object.entries(serverMap)) {
+            map[key] = new Set(Array.isArray(tfs) ? tfs : [tfs]);
+        }
+        return map;
+    }
+    // Fallback: build from results array (may undercount if > 200 profitable)
     const map = {};
     results.forEach(r => {
         if (r.total_pips > 0 && r.profit_factor > 1) {
@@ -432,7 +442,7 @@ function buildMultiTFMap(results) {
 
 function displayResults(results, meta) {
     allResults = results;
-    multiTFMap = buildMultiTFMap(results);
+    multiTFMap = buildMultiTFMap(meta.multi_tf_map, results);
 
     // Count strategies profitable in 2+ TFs
     const multiTFCount = Object.values(multiTFMap).filter(s => s.size >= 2).length;
@@ -534,9 +544,22 @@ function renderTable() {
     }).join('');
 
     const multiCount = rows.filter(r => r._tf_count >= 2).length;
-    document.getElementById('results-count').textContent =
-        `Showing ${rows.length} of ${allResults.length} results` +
-        (multiCount > 0 ? ` — ${multiCount} multi-TF strategies ★` : '');
+    const onlyMTFChecked = document.getElementById('filter-multitf')?.checked;
+
+    let countMsg = `Showing ${rows.length} of ${allResults.length} results`;
+    if (multiCount > 0) countMsg += ` — ${multiCount} multi-TF ★`;
+
+    // Show hint if Multi-TF filter active but no results
+    if (onlyMTFChecked && rows.length === 0) {
+        const tfsRan = [...new Set(allResults.map(r => r.timeframe))];
+        if (tfsRan.length <= 1) {
+            countMsg = `⚠️ Multi-TF শুধু তখন কাজ করে যখন ২+ TF select করে Run দেওয়া হয়। এখন শুধু ${tfsRan[0]||'?'} চালানো হয়েছে।`;
+        } else {
+            countMsg = `এই Run এ কোনো strategy একাধিক TF এ profitable নয়। বেশি TF select করে আবার চেষ্টা করুন।`;
+        }
+    }
+
+    document.getElementById('results-count').innerHTML = countMsg;
 }
 
 function escHtml(str) {

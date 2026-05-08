@@ -163,33 +163,69 @@ class Database:
         except Exception as e:
             logger.error(f"Failed to write log to DB: {e}")
 
+    def has_open_pattern_signal(self, pair: str, mode: str, timeframe: str) -> bool:
+        """Return True if an OPEN pattern signal already exists for this pair+mode+tf."""
+        row = self.execute_one(
+            "SELECT COUNT(*) as cnt FROM signals WHERE pair = :p0 AND mode = :p1 AND timeframe = :p2 AND status = 'OPEN'",
+            (pair, mode, timeframe)
+        )
+        return (row['cnt'] if row else 0) > 0
+
     def get_active_pairs(self) -> List[str]:
         """Return list of active trading pair symbols."""
         rows = self.execute("SELECT symbol FROM pairs WHERE is_active = TRUE")
         return [r['symbol'] for r in rows]
 
-    def get_open_signal_count(self) -> int:
-        """Count currently open signals."""
-        row = self.execute_one(
-            "SELECT COUNT(*) as cnt FROM signals WHERE status = 'OPEN'"
-        )
+    def get_open_signal_count(self, mode: str = None) -> int:
+        """Count currently open signals. Optionally filter by mode."""
+        if mode:
+            row = self.execute_one(
+                "SELECT COUNT(*) as cnt FROM signals WHERE status = 'OPEN' AND mode = :p0",
+                (mode,)
+            )
+        else:
+            row = self.execute_one(
+                "SELECT COUNT(*) as cnt FROM signals WHERE status = 'OPEN'"
+            )
         return row['cnt'] if row else 0
 
-    def get_open_signals_summary(self) -> list:
-        """Get summary of all open signals for correlation checks."""
+    def get_open_signals_summary(self, mode: str = None) -> list:
+        """Get summary of open signals for correlation checks.
+        Args:
+            mode: Filter by exact mode name (e.g. 'hybrid', 'technical', 'news').
+                  'pattern' is special — matches all 'Mode_%' pattern signals.
+                  None returns all open signals.
+        """
         try:
-            rows = self.execute(
-                "SELECT pair, direction FROM signals WHERE status = 'OPEN'"
-            )
+            if mode is None:
+                rows = self.execute(
+                    "SELECT pair, direction FROM signals WHERE status = 'OPEN'"
+                )
+            elif mode == 'pattern':
+                rows = self.execute(
+                    "SELECT pair, direction FROM signals WHERE status = 'OPEN' AND mode LIKE 'Mode_%'"
+                )
+            else:
+                # Exact mode match: hybrid, technical, news, technical_news_filter, ai, etc.
+                rows = self.execute(
+                    "SELECT pair, direction FROM signals WHERE status = 'OPEN' AND mode = :p0",
+                    (mode,)
+                )
             return [{'pair': r['pair'], 'direction': r['direction']} for r in rows] if rows else []
         except Exception:
             return []
 
-    def get_today_signal_count(self) -> int:
-        """Count signals generated today."""
-        row = self.execute_one(
-            "SELECT COUNT(*) as cnt FROM signals WHERE DATE(created_at) = CURDATE() AND status != 'CANCELLED'"
-        )
+    def get_today_signal_count(self, mode: str = None) -> int:
+        """Count signals generated today. Optionally filter by mode."""
+        if mode:
+            row = self.execute_one(
+                "SELECT COUNT(*) as cnt FROM signals WHERE DATE(created_at) = CURDATE() AND status != 'CANCELLED' AND mode = :p0",
+                (mode,)
+            )
+        else:
+            row = self.execute_one(
+                "SELECT COUNT(*) as cnt FROM signals WHERE DATE(created_at) = CURDATE() AND status != 'CANCELLED'"
+            )
         return row['cnt'] if row else 0
 
     def save_signal(self, signal: dict) -> int:
@@ -232,6 +268,46 @@ class Database:
                 'OPEN',
             )
         )
+
+    def get_mode_stats(self) -> list:
+        """
+        Per-mode performance stats.
+        Returns list of dicts: {mode, total, wins, losses, open, win_rate, avg_pips}
+        """
+        rows = self.execute("""
+            SELECT
+                mode,
+                COUNT(*)                                              AS total,
+                SUM(status = 'CLOSED_TP')                            AS wins,
+                SUM(status = 'CLOSED_SL')                            AS losses,
+                SUM(status = 'OPEN')                                 AS open_signals,
+                ROUND(
+                    SUM(status='CLOSED_TP') * 100.0
+                    / NULLIF(SUM(status IN ('CLOSED_TP','CLOSED_SL')), 0)
+                , 1)                                                  AS win_rate,
+                ROUND(AVG(CASE WHEN status IN ('CLOSED_TP','CLOSED_SL')
+                               THEN actual_pips END), 1)             AS avg_pips,
+                ROUND(SUM(CASE WHEN status IN ('CLOSED_TP','CLOSED_SL')
+                               THEN actual_profit ELSE 0 END), 2)    AS total_profit
+            FROM signals
+            WHERE mode IS NOT NULL
+            GROUP BY mode
+            ORDER BY win_rate DESC
+        """)
+        return [dict(r) for r in (rows or [])]
+
+    def get_recent_closed(self, limit: int = 10) -> list:
+        """Last N closed signals with result."""
+        rows = self.execute("""
+            SELECT signal_id, pair, direction, mode, timeframe,
+                   entry_price, close_price, actual_pips, actual_profit,
+                   status, duration_minutes, close_time
+            FROM signals
+            WHERE status IN ('CLOSED_TP', 'CLOSED_SL')
+            ORDER BY close_time DESC
+            LIMIT %s
+        """ % int(limit))
+        return [dict(r) for r in (rows or [])]
 
     def close_signal(self, signal_id: str, close_data: dict) -> bool:
         """Update a signal with close information."""

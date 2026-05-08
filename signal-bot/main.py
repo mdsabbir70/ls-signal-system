@@ -28,6 +28,7 @@ load_dotenv()
 
 from utils.logger import setup_logger
 from utils.database import db
+from utils.pair_config import get_pair_config as _pair_cfg
 from utils.config import config
 
 logger = setup_logger('main')
@@ -45,13 +46,18 @@ def _handle_shutdown(signum, frame):
 # ─── Signal Engine Loop ───────────────────────────────────────────────────────
 
 async def run_signal_engine():
-    """Main trading loop — runs every 5 minutes."""
+    """Main trading loop — runs all active trading modes every 5 minutes.
+
+    Active modes are configured via 'active_hybrid_modes' DB setting.
+    Each mode (technical, hybrid, news, technical_news_filter) runs independently
+    with its own scoring logic and signal generation.
+    """
     from signals.signal_engine import SignalEngine
 
     engine = SignalEngine(db, config)
     await engine.initialize()
 
-    logger.info("Signal engine started")
+    logger.info("Signal engine started (multi-mode)")
 
     while not _shutdown.is_set():
         try:
@@ -69,8 +75,24 @@ async def run_signal_engine():
                 await asyncio.sleep(60)
                 continue
 
-            # Run signal engine cycle
-            await engine.run_cycle()
+            # Get active trading modes from DB
+            active_modes_str = config.get('active_hybrid_modes', 'hybrid')
+            active_modes = [m.strip() for m in active_modes_str.split(',') if m.strip()]
+
+            if not active_modes:
+                active_modes = ['hybrid']
+
+            logger.info(f"Running {len(active_modes)} trading modes: {', '.join(active_modes)}")
+
+            # Run each mode sequentially (shares cached data between modes)
+            for mode in active_modes:
+                if _shutdown.is_set():
+                    break
+                try:
+                    await engine.run_cycle(trading_mode=mode)
+                except Exception as e:
+                    logger.error(f"[{mode}] Mode error: {e}", exc_info=True)
+                    db.log('error', f'signal_engine_{mode}', str(e))
 
         except asyncio.CancelledError:
             break
@@ -258,7 +280,9 @@ async def _check_open_signals(fetcher, notifier):
                 hit = 'SL'
 
         if hit:
-            await _close_signal_auto(signal, current_price, hit, notifier)
+            # Close at SL/TP price (not current_price) — prevents wrong pips on gaps/slippage
+            close_at = take_profit if hit == 'TP' else stop_loss
+            await _close_signal_auto(signal, close_at, hit, notifier)
 
 
 async def _close_signal_auto(signal, close_price, hit_type, notifier):
@@ -273,13 +297,12 @@ async def _close_signal_auto(signal, close_price, hit_type, notifier):
     # Calculate pips
     pip_diff = (close_price - entry_price) if direction == 'BUY' else (entry_price - close_price)
 
-    pip_size = 0.01 if 'JPY' in pair else 0.0001
-    if 'XAU' in pair:
-        pip_size = 0.1
+    _cfg = _pair_cfg(pair)
+    pip_size  = _cfg['pip_size']
+    pip_value = _cfg['pip_value']
 
     actual_pips   = round(pip_diff / pip_size, 1)
     lot_size      = float(signal.get('suggested_lot') or 0.01)
-    pip_value     = 10.0
     actual_profit = round(lot_size * actual_pips * pip_value, 2)
 
     # Duration
@@ -310,7 +333,7 @@ async def _close_signal_auto(signal, close_price, hit_type, notifier):
         icon = '✅' if hit_type == 'TP' else '🛑'
         logger.info(
             f"{icon} {pair} {direction} {status} | "
-            f"Entry={entry_price:.5f} Close={close_price:.5f} "
+            f"Entry={entry_price} Close={close_price} "
             f"Pips={actual_pips:+.1f} P&L=${actual_profit:+.2f} "
             f"Duration={duration_min}min"
         )
@@ -325,6 +348,51 @@ async def _close_signal_auto(signal, close_price, hit_type, notifier):
                 await notifier.send_signal_close(signal, close_data)
             except Exception as e:
                 logger.error(f"Close notification failed: {e}")
+
+
+# ─── Pattern Trading Modes Runner ────────────────────────────────────────────
+
+async def run_trading_modes():
+    """
+    Run all 5 pattern-based trading modes simultaneously.
+    Cycles every 5 minutes, same cadence as the main signal engine.
+    Each mode checks its specific pattern + filter on the configured timeframes.
+    """
+    from signals.pattern_signal_engine import PatternSignalEngine
+
+    engine = PatternSignalEngine(db, config)
+    await engine.initialize()
+
+    logger.info("Pattern Trading Modes started (21 modes × all pairs)")
+
+    while not _shutdown.is_set():
+        try:
+            if not config.bot_active:
+                await asyncio.sleep(60)
+                continue
+
+            config.refresh()
+
+            if not _is_trading_hours():
+                await asyncio.sleep(60)
+                continue
+
+            await engine.run_cycle()
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Trading modes error: {e}", exc_info=True)
+            db.log('error', 'trading_modes', str(e))
+            await asyncio.sleep(30)
+
+        # Wait 60 seconds between cycles (near-real-time: new candle detected within ~1 min)
+        try:
+            await asyncio.wait_for(_shutdown.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            pass
+
+    logger.info("Pattern Trading Modes stopped")
 
 
 # ─── Daily Summary Scheduler ─────────────────────────────────────────────────
@@ -575,6 +643,7 @@ async def startup():
     logger.info(f"Trading mode:   {config.trading_mode}")
     logger.info(f"Min confluence: {config.min_confluence_score}")
     logger.info(f"Active pairs:   {db.get_active_pairs()}")
+    logger.info(f"Pattern modes:  5 (Double_Bottom+RSI, Rising_Wedge+ADX, Double_Bottom+ADX, Falling_Wedge+EMA, Triple_Bottom)")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -594,10 +663,11 @@ async def main(run_bot: bool = True, run_api: bool = True):
     if run_api:
         tasks.append(asyncio.create_task(run_flask_api(),   name='flask-api'))
     if run_bot:
-        tasks.append(asyncio.create_task(run_signal_engine(), name='signal-engine'))
+        tasks.append(asyncio.create_task(run_signal_engine(),   name='signal-engine'))
+        tasks.append(asyncio.create_task(run_trading_modes(),   name='trading-modes'))
         tasks.append(asyncio.create_task(run_daily_scheduler(), name='daily-scheduler'))
-        tasks.append(asyncio.create_task(run_news_fetcher(), name='news-fetcher'))
-        tasks.append(asyncio.create_task(run_signal_monitor(), name='signal-monitor'))
+        tasks.append(asyncio.create_task(run_news_fetcher(),    name='news-fetcher'))
+        tasks.append(asyncio.create_task(run_signal_monitor(),  name='signal-monitor'))
 
     if not tasks:
         logger.error("Nothing to run — specify --bot-only or --api-only or both")

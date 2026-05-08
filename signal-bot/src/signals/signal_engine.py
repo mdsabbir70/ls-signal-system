@@ -33,6 +33,7 @@ from signals.confluence_scorer import ConfluenceScorer
 from risk.position_sizer import PositionSizer
 from risk.stop_hunt_detector import StopHuntDetector
 from utils.logger import setup_logger
+from utils.pair_config import price_decimals as _cfg_decimals
 
 logger = setup_logger('signal_engine')
 
@@ -91,22 +92,28 @@ class SignalEngine:
         except Exception as e:
             logger.warning(f"AI Trade Brain not available: {e}")
 
-    async def run_cycle(self):
-        """Run one full cycle for all active pairs."""
+    async def run_cycle(self, trading_mode: str = None):
+        """Run one full cycle for all active pairs with a specific trading mode.
+
+        Args:
+            trading_mode: Override the config trading_mode for this cycle.
+                         If None, uses self.config.trading_mode.
+        """
+        mode = trading_mode or self.config.trading_mode
         pairs = self.db.get_active_pairs()
         if not pairs:
             logger.warning("No active pairs configured")
             return
 
-        # Check global limits first
-        today_count = self.db.get_today_signal_count()
+        # Check global limits per mode
+        today_count = self.db.get_today_signal_count(mode=mode)
         if today_count >= self.config.max_daily_signals:
-            logger.info(f"Daily signal limit reached ({today_count}/{self.config.max_daily_signals})")
+            logger.info(f"[{mode}] Daily signal limit reached ({today_count}/{self.config.max_daily_signals})")
             return
 
-        open_count = self.db.get_open_signal_count()
+        open_count = self.db.get_open_signal_count(mode=mode)
         if open_count >= self.config.max_open_positions:
-            logger.info(f"Max open positions reached ({open_count}/{self.config.max_open_positions})")
+            logger.info(f"[{mode}] Max open positions reached ({open_count}/{self.config.max_open_positions})")
             return
 
         # Check cool-off
@@ -126,22 +133,44 @@ class SignalEngine:
         if self.corr_analyzer._price_cache:
             self.corr_analyzer.calculate_live_correlations()
 
-        logger.info(f"Running cycle for {len(pairs)} pairs | today={today_count} open={open_count}")
+        logger.info(f"[{mode}] Running cycle for {len(pairs)} pairs | today={today_count} open={open_count}")
 
-        tasks = [self._process_pair(pair, news_data) for pair in pairs]
-        # Note: sentiment is fetched per-pair inside _process_pair since it varies by pair type
+        tasks = [self._process_pair(pair, news_data, trading_mode=mode) for pair in pairs]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         signals_generated = sum(1 for r in results if r is True)
-        logger.info(f"Cycle complete. Signals generated: {signals_generated}/{len(pairs)}")
+        logger.info(f"[{mode}] Cycle complete. Signals generated: {signals_generated}/{len(pairs)}")
 
-    async def _process_pair(self, pair: str, news_data: dict) -> bool:
-        """Run full pipeline for one pair. Returns True if signal generated."""
+    async def _fetch_ohlcv_cached(self, pair: str, tf: str, bars: int) -> 'pd.DataFrame | None':
+        """
+        Fetch OHLCV using market_data_cache (Binance/TwelveData).
+        Falls back to PriceFetcher (Yahoo) only if cache fails.
+        """
+        import asyncio as _aio
+        loop = _aio.get_event_loop()
         try:
-            # 1. Fetch OHLCV
-            df_h1 = await self.fetcher.get_ohlcv(pair, 'H1', bars=300)
-            df_h4 = await self.fetcher.get_ohlcv(pair, 'H4', bars=200)
-            df_d1 = await self.fetcher.get_ohlcv(pair, 'D1', bars=200)
+            from data.market_data_cache import load_or_download
+            df = await loop.run_in_executor(None, load_or_download, pair, tf, 0)
+            if df is not None and len(df) >= 50:
+                return df.tail(bars)
+        except Exception as e:
+            logger.debug(f"Cache fetch error {pair} {tf}: {e}")
+        # Fallback to Yahoo (usually broken but keep as safety net)
+        try:
+            df = await self.fetcher.get_ohlcv(pair, tf, bars=bars)
+            return df
+        except Exception:
+            pass
+        return None
+
+    async def _process_pair(self, pair: str, news_data: dict, trading_mode: str = None) -> bool:
+        """Run full pipeline for one pair. Returns True if signal generated."""
+        mode = trading_mode or self.config.trading_mode
+        try:
+            # 1. Fetch OHLCV — use market_data_cache (Binance/TwelveData), not Yahoo Finance
+            df_h1 = await self._fetch_ohlcv_cached(pair, 'H1', bars=300)
+            df_h4 = await self._fetch_ohlcv_cached(pair, 'H4', bars=200)
+            df_d1 = await self._fetch_ohlcv_cached(pair, 'D1', bars=200)
 
             if df_h1 is None or len(df_h1) < 50:
                 logger.warning(f"{pair}: insufficient H1 data")
@@ -153,7 +182,7 @@ class SignalEngine:
             htf = self.ind_eng.calculate(df_d1, 'D1') if df_d1 is not None else None
 
             # 3. Detect market regime
-            regime = self.regime_d.detect(ltf, mtf, htf, timeframe=self.config.primary_timeframe)
+            regime = self.regime_d.detect(ltf, mtf, htf, timeframe=self.config.primary_timeframe, pair=pair)
 
             if not regime.tradeable:
                 logger.debug(f"{pair}: regime not tradeable — {regime.reason}")
@@ -226,7 +255,7 @@ class SignalEngine:
             best_score  = 0.0
 
             # Get open signals for correlation check
-            open_signals = self.db.get_open_signals_summary()
+            open_signals = self.db.get_open_signals_summary(mode=mode)
 
             for direction in ('BUY', 'SELL'):
                 # Update sentiment for this direction
@@ -248,12 +277,13 @@ class SignalEngine:
                     regime=regime,
                     news_sentiment=sentiment,
                     ai_confidence=ai_confidence,
-                    trading_mode=self.config.trading_mode,
+                    trading_mode=mode,
                     liquidity=liquidity,
                     candles=candle_result,
                     session=session_ctx,
                     correlation=corr_result,
                     sentiment=sentiment_result,
+                    pair=pair,
                 )
 
                 # Correlation hard block
@@ -277,7 +307,7 @@ class SignalEngine:
                 return False
 
             # 5b. News gate (technical_news_filter mode only)
-            if self.config.trading_mode == 'technical_news_filter':
+            if mode == 'technical_news_filter':
                 gate = self._news_gate_check(pair, best_signal['direction'], news_data)
                 if gate == 'BLOCK':
                     logger.info(
@@ -309,7 +339,7 @@ class SignalEngine:
 
             # 5c. AI Trade Brain analysis (full context)
             ai_verdict = None
-            if self._trade_brain and self.config.trading_mode in ('hybrid', 'ai'):
+            if self._trade_brain and mode in ('hybrid', 'ai'):
                 try:
                     brain_context = {
                         'pair': pair,
@@ -358,7 +388,7 @@ class SignalEngine:
                 logger.warning(f"{pair}: ATR not available — skipping")
                 return False
 
-            sl, tp = self.ind_eng.calc_sl_tp(entry, direction, ltf.atr)
+            sl, tp = self.ind_eng.calc_sl_tp(entry, direction, ltf.atr, pair=pair)
 
             # 7. Stop hunt detector
             hunt_result = self.hunt_d.check(
@@ -370,8 +400,9 @@ class SignalEngine:
                 swing_lows =[ltf.nearest_support]    if ltf.nearest_support    else [],
                 atr=ltf.atr,
             )
-            sl = hunt_result['adjusted_sl']
-            tp = hunt_result['adjusted_tp']
+            _dec = _cfg_decimals(pair)
+            sl = round(hunt_result['adjusted_sl'], _dec)
+            tp = round(hunt_result['adjusted_tp'], _dec)
 
             # 8. Calculate pip distances and R:R
             sl_pips = self.ind_eng.calc_pip_distance(entry, sl, pair)
@@ -392,9 +423,9 @@ class SignalEngine:
                 'signal_id':          signal_id,
                 'pair':               pair,
                 'direction':          direction,
-                'mode':               self.config.trading_mode,
+                'mode':               mode,
                 'strategy':           f"Confluence-{best_signal['quality']}",
-                'entry_price':        round(entry, 5),
+                'entry_price':        round(entry, _cfg_decimals(pair)),
                 'stop_loss':          sl,
                 'take_profit':        tp,
                 'suggested_lot':      size_result['lot_size'],
@@ -430,6 +461,14 @@ class SignalEngine:
                 'indicator_snapshot': ltf.to_dict(),
             }
 
+            # 10b. Validate before DB save
+            if entry <= 0 or sl <= 0 or tp <= 0:
+                logger.warning(f'{pair} {direction}: SKIPPED — invalid prices entry={entry} sl={sl} tp={tp}')
+                return False
+            if sl_pips <= 0 or tp_pips <= 0:
+                logger.warning(f'{pair} {direction}: SKIPPED — zero pips sl={sl_pips} tp={tp_pips}')
+                return False
+
             # 11. Save to DB
             signal_db_id = self.db.save_signal(signal)
             logger.info(
@@ -456,7 +495,8 @@ class SignalEngine:
         if not self._news_feed:
             return {}
 
-        if self.config.trading_mode == 'technical':
+        # Note: news fetching is shared across modes; technical mode scorer handles redistribution
+        if False:  # Was: skip news in technical mode, now fetch for all modes
             return {}   # Skip news in pure technical mode (technical_news_filter still needs news)
 
         try:

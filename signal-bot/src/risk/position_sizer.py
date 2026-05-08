@@ -21,6 +21,7 @@ Lot size limits:
 """
 
 from __future__ import annotations
+from utils.pair_config import get_pair_config as _pair_cfg
 from utils.logger import setup_logger
 
 logger = setup_logger('position_sizer')
@@ -40,6 +41,21 @@ PIP_VALUES_USD = {
     'GBPJPY': 9.0,
     'AUDJPY': 9.0,
     'EURGBP': 12.8,   # Approximate in USD
+
+    # Crypto pip values (all $1.0 — pip_size already normalizes magnitude)
+    'BTCUSDT':  1.0,   # pip=1.0   → SL~300p → lot~0.07
+    'ETHUSDT':  1.0,   # pip=0.1   → SL~50p  → lot~0.40
+    'BNBUSDT':  1.0,   # pip=0.1   → SL~30p  → lot~0.67
+    'SOLUSDT':  1.0,   # pip=0.01  → SL~40p  → lot~0.50
+    'LINKUSDT': 1.0,   # pip=0.01  → SL~10p  → lot~2.0
+    'DOTUSDT':  1.0,   # pip=0.01  → SL~3p   → lot~6.7
+    'ADAUSDT':  1.0,   # pip=0.01  → SL~3p   → lot~6.7
+    'TONUSDT':  1.0,   # pip=0.01
+    'HYPEUSDT': 1.0,   # pip=0.01
+    'SUIUSDT':  1.0,   # pip=0.01
+    'XRPUSDT':  1.0,   # pip=0.001 → SL~5p   → lot~4.0
+    'DOGEUSDT': 1.0,   # pip=0.001 → SL~3p   → lot~6.7
+    'PEPEUSDT': 1.0,   # pip=0.000001
 }
 
 
@@ -78,8 +94,10 @@ class PositionSizer:
         # Lot size = risk_amount / (sl_pips × pip_value)
         raw_lot = risk_amount / (sl_pips * pip_value)
 
-        # Clamp to allowed range
-        lot_size = max(self.MIN_LOT, min(self.MAX_LOT, raw_lot))
+        # Clamp to allowed range (crypto allows bigger lots since pip_value=$1)
+        _is_crypto = pair.endswith('USDT')
+        _max = 10.0 if _is_crypto else self.MAX_LOT
+        lot_size = max(self.MIN_LOT, min(_max, raw_lot))
 
         # Round to broker step size
         lot_size = round(int(lot_size / self.LOT_STEP) * self.LOT_STEP, 2)

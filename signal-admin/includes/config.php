@@ -7,13 +7,13 @@
 // ── Database ─────────────────────────────────────────────────────────────────
 define('DB_HOST',    getenv('DB_HOST')     ?: 'localhost');
 define('DB_PORT',    getenv('DB_PORT')     ?: '3306');
-define('DB_NAME',    getenv('DB_NAME')     ?: 'ls_trading_signals');
-define('DB_USER',    getenv('DB_USER')     ?: 'root');
-define('DB_PASS',    getenv('DB_PASS')     ?: '');
+define('DB_NAME',    getenv('DB_NAME')     ?: 'sign_ls_signals');
+define('DB_USER',    getenv('DB_USER')     ?: 'sign_ls_user');
+define('DB_PASS',    getenv('DB_PASS')     ?: 'Signal2026DB!');
 
 // ── Bot API ───────────────────────────────────────────────────────────────────
 define('BOT_API_URL', getenv('BOT_API_URL') ?: 'http://127.0.0.1:5050');
-define('BOT_API_KEY', getenv('BOT_API_KEY') ?: '');
+define('BOT_API_KEY', getenv('BOT_API_KEY') ?: 'LSAdmin2026!ApiKey');
 
 // ── Session ────────────────────────────────────────────────────────────────────
 define('SESSION_LIFETIME', 7200);          // 2 hours

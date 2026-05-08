@@ -17,9 +17,11 @@ if ($view_id) {
     $page_title = $signal['signal_id'];
     require_once __DIR__ . '/../includes/header.php';
 
-    $bd = json_decode($signal['score_breakdown'] ?? '{}', true);
+    $bd_raw = json_decode($signal['score_breakdown'] ?? '{}', true);
+    $bd = is_string($bd_raw) ? json_decode($bd_raw, true) ?? [] : ($bd_raw ?? []);
     $detail = $bd['detail'] ?? [];
-    $snap = json_decode($signal['indicator_snapshot'] ?? '{}', true);
+    $snap_raw = json_decode($signal['indicator_snapshot'] ?? '{}', true);
+    $snap = is_string($snap_raw) ? json_decode($snap_raw, true) ?? [] : ($snap_raw ?? []);
     $is_buy = $signal['direction'] === 'BUY';
     $dir_color = $is_buy ? 'var(--buy)' : 'var(--sell)';
     $status_class = match($signal['status']) {
@@ -53,15 +55,15 @@ if ($view_id) {
     <!-- Trade Details -->
     <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
         <div class="stat-card">
-            <div class="stat-value"><?= number_format((float)$signal['entry_price'], 5) ?></div>
+            <div class="stat-value"><?= fmt_price((float)$signal['entry_price'], $signal['pair']) ?></div>
             <div class="stat-label">Entry Price</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" style="color:var(--sell)"><?= number_format((float)$signal['stop_loss'], 5) ?></div>
+            <div class="stat-value" style="color:var(--sell)"><?= fmt_price((float)$signal['stop_loss'], $signal['pair']) ?></div>
             <div class="stat-label">Stop Loss (<?= $signal['sl_pips'] ?> pips)</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" style="color:var(--buy)"><?= number_format((float)$signal['take_profit'], 5) ?></div>
+            <div class="stat-value" style="color:var(--buy)"><?= fmt_price((float)$signal['take_profit'], $signal['pair']) ?></div>
             <div class="stat-label">Take Profit (<?= $signal['tp_pips'] ?> pips)</div>
         </div>
         <div class="stat-card">
@@ -85,7 +87,7 @@ if ($view_id) {
         <div class="card-body">
             <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
                 <div class="stat-card">
-                    <div class="stat-value"><?= $signal['close_price'] ? number_format((float)$signal['close_price'], 5) : '—' ?></div>
+                    <div class="stat-value"><?= $signal['close_price'] ? fmt_price((float)$signal['close_price'], $signal['pair']) : '—' ?></div>
                     <div class="stat-label">Close Price</div>
                 </div>
                 <div class="stat-card">
@@ -114,80 +116,153 @@ if ($view_id) {
         <div class="card-header"><h2>Confluence Score Breakdown</h2></div>
         <div class="card-body">
             <?php
-            $has_liquidity = isset($bd['liquidity']);
-            $categories = $has_liquidity
-                ? ['Technical' => ['max' => 30, 'val' => $bd['technical'] ?? 0, 'items' => [
-                        'EMA Alignment' => [$detail['ema_alignment'] ?? 0, 10],
-                        'MACD Cross' => [$detail['macd_cross'] ?? 0, 8],
-                        'RSI Condition' => [$detail['rsi_condition'] ?? 0, 6],
-                        'ADX Strength' => [$detail['adx_strength'] ?? 0, 6],
-                    ]],
-                    'Multi-Timeframe' => ['max' => 15, 'val' => $bd['multi_tf'] ?? 0, 'items' => [
-                        'HTF (D1) Trend' => [$detail['htf_trend'] ?? 0, 8],
-                        'MTF (H4) Trend' => [$detail['mtf_trend'] ?? 0, 7],
-                    ]],
-                    'News/Sentiment' => ['max' => 15, 'val' => $bd['news'] ?? 0, 'items' => [
-                        'News Sentiment' => [$detail['news_sentiment'] ?? 0, 8],
-                        'AI Confidence' => [$detail['ai_confidence'] ?? 0, 7],
-                    ]],
-                    'Liquidity/SMC' => ['max' => 20, 'val' => $bd['liquidity'] ?? 0, 'items' => [
-                        'Order Block' => [$detail['order_block'] ?? 0, 6],
-                        'Fair Value Gap' => [$detail['fvg'] ?? 0, 5],
-                        'Market Structure' => [$detail['market_structure'] ?? 0, 5],
-                        'Liquidity Sweep' => [$detail['liquidity_sweep'] ?? 0, 4],
-                    ]],
-                    'Conditions' => ['max' => 20, 'val' => $bd['conditions'] ?? 0, 'items' => [
-                        'Market Regime' => [$detail['market_regime'] ?? 0, 10],
-                        'Volatility' => [$detail['volatility'] ?? 0, 5],
-                        'Stochastic' => [$detail['stochastic'] ?? 0, 5],
-                    ]]]
-                : ['Technical' => ['max' => 40, 'val' => $bd['technical'] ?? 0, 'items' => [
-                        'EMA Alignment' => [$detail['ema_alignment'] ?? 0, 15],
-                        'MACD Cross' => [$detail['macd_cross'] ?? 0, 10],
-                        'RSI Condition' => [$detail['rsi_condition'] ?? 0, 8],
-                        'ADX Strength' => [$detail['adx_strength'] ?? 0, 7],
-                    ]],
-                    'Multi-Timeframe' => ['max' => 20, 'val' => $bd['multi_tf'] ?? 0, 'items' => [
-                        'HTF (D1) Trend' => [$detail['htf_trend'] ?? 0, 10],
-                        'MTF (H4) Trend' => [$detail['mtf_trend'] ?? 0, 10],
-                    ]],
-                    'News/Sentiment' => ['max' => 20, 'val' => $bd['news'] ?? 0, 'items' => [
-                        'News Sentiment' => [$detail['news_sentiment'] ?? 0, 10],
-                        'AI Confidence' => [$detail['ai_confidence'] ?? 0, 10],
-                    ]],
-                    'Conditions' => ['max' => 20, 'val' => $bd['conditions'] ?? 0, 'items' => [
-                        'Market Regime' => [$detail['market_regime'] ?? 0, 10],
-                        'Volatility' => [$detail['volatility'] ?? 0, 5],
-                        'Stochastic' => [$detail['stochastic'] ?? 0, 5],
-                    ]]];
+            $is_pattern_mode = isset($bd['pattern_base']);
 
-            foreach ($categories as $cat_name => $cat): ?>
-            <div style="margin-bottom:1.25rem">
-                <div style="display:flex;justify-content:space-between;margin-bottom:.4rem">
-                    <strong><?= $cat_name ?></strong>
-                    <span><?= round($cat['val'], 1) ?> / <?= $cat['max'] ?></span>
+            if ($is_pattern_mode):
+                // ── Pattern Mode Score Breakdown ──
+                $pattern_cats = [
+                    'Pattern Detection' => ['max' => 30, 'val' => $bd['pattern_base'] ?? 0, 'items' => [
+                        'Pattern Detected' => [$bd['pattern_base'] ?? 0, 30],
+                    ]],
+                    'Filter Confirmation' => ['max' => 20, 'val' => $bd['filter_confirmed'] ?? 0, 'items' => [
+                        'Filter Passed' => [$bd['filter_confirmed'] ?? 0, 20],
+                    ]],
+                    'Backtest Quality' => ['max' => 35, 'val' => round(($bd['win_rate_bonus'] ?? 0) + ($bd['profit_factor_bonus'] ?? 0), 1), 'items' => [
+                        'Win Rate Bonus' => [$bd['win_rate_bonus'] ?? 0, 25],
+                        'Profit Factor' => [$bd['profit_factor_bonus'] ?? 0, 10],
+                    ]],
+                    'Risk:Reward' => ['max' => 15, 'val' => $bd['risk_reward_bonus'] ?? 0, 'items' => [
+                        'R:R Bonus' => [$bd['risk_reward_bonus'] ?? 0, 15],
+                    ]],
+                ];
+                foreach ($pattern_cats as $cat_name => $cat): ?>
+                <div style="margin-bottom:1.25rem">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:.4rem">
+                        <strong><?= $cat_name ?></strong>
+                        <span><?= round($cat['val'], 1) ?> / <?= $cat['max'] ?></span>
+                    </div>
+                    <div style="background:var(--bg-input);border-radius:6px;height:10px;overflow:hidden">
+                        <div style="background:var(--primary);height:100%;width:<?= $cat['max'] > 0 ? min(100, round(($cat['val'] / $cat['max']) * 100)) : 0 ?>%;border-radius:6px;transition:width .3s"></div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.25rem .5rem;margin-top:.35rem;font-size:.85rem;color:var(--text-muted)">
+                        <?php foreach ($cat['items'] as $label => [$val, $max]): ?>
+                        <span><?= $label ?>: <strong style="color:var(--text)"><?= round($val, 1) ?></strong>/<?= $max ?></span>
+                        <?php endforeach; ?>
+                    </div>
                 </div>
-                <div style="background:var(--bg-input);border-radius:6px;height:10px;overflow:hidden">
-                    <div style="background:var(--primary);height:100%;width:<?= $cat['max'] > 0 ? round(($cat['val'] / $cat['max']) * 100) : 0 ?>%;border-radius:6px;transition:width .3s"></div>
+                <?php endforeach; ?>
+
+                <!-- Backtest Stats -->
+                <div style="margin-top:1rem;padding:.75rem;background:var(--bg-input);border-radius:8px;font-size:.9rem">
+                    <strong>Backtest Stats:</strong>
+                    Win Rate <strong><?= $bd['backtest_wr'] ?? 0 ?>%</strong> &nbsp;|&nbsp;
+                    Profit Factor <strong><?= $bd['backtest_pf'] ?? 0 ?></strong>
                 </div>
-                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.25rem .5rem;margin-top:.35rem;font-size:.85rem;color:var(--text-muted)">
-                    <?php foreach ($cat['items'] as $label => [$val, $max]): ?>
-                    <span><?= $label ?>: <strong style="color:var(--text)"><?= round($val, 1) ?></strong>/<?= $max ?></span>
-                    <?php endforeach; ?>
+
+            <?php else:
+                // ── Hybrid Mode Score Breakdown ──
+                $has_liquidity = isset($bd['liquidity']);
+                $categories = $has_liquidity
+                    ? ['Technical' => ['max' => 30, 'val' => $bd['technical'] ?? 0, 'items' => [
+                            'EMA Alignment' => [$detail['ema_alignment'] ?? 0, 10],
+                            'MACD Cross' => [$detail['macd_cross'] ?? 0, 8],
+                            'RSI Condition' => [$detail['rsi_condition'] ?? 0, 6],
+                            'ADX Strength' => [$detail['adx_strength'] ?? 0, 6],
+                        ]],
+                        'Multi-Timeframe' => ['max' => 15, 'val' => $bd['multi_tf'] ?? 0, 'items' => [
+                            'HTF (D1) Trend' => [$detail['htf_trend'] ?? 0, 8],
+                            'MTF (H4) Trend' => [$detail['mtf_trend'] ?? 0, 7],
+                        ]],
+                        'News/Sentiment' => ['max' => 15, 'val' => $bd['news'] ?? 0, 'items' => [
+                            'News Sentiment' => [$detail['news_sentiment'] ?? 0, 8],
+                            'AI Confidence' => [$detail['ai_confidence'] ?? 0, 7],
+                        ]],
+                        'Liquidity/SMC' => ['max' => 20, 'val' => $bd['liquidity'] ?? 0, 'items' => [
+                            'Order Block' => [$detail['order_block'] ?? 0, 6],
+                            'Fair Value Gap' => [$detail['fvg'] ?? 0, 5],
+                            'Market Structure' => [$detail['market_structure'] ?? 0, 5],
+                            'Liquidity Sweep' => [$detail['liquidity_sweep'] ?? 0, 4],
+                        ]],
+                        'Conditions' => ['max' => 20, 'val' => $bd['conditions'] ?? 0, 'items' => [
+                            'Market Regime' => [$detail['market_regime'] ?? 0, 10],
+                            'Volatility' => [$detail['volatility'] ?? 0, 5],
+                            'Stochastic' => [$detail['stochastic'] ?? 0, 5],
+                        ]]]
+                    : ['Technical' => ['max' => 40, 'val' => $bd['technical'] ?? 0, 'items' => [
+                            'EMA Alignment' => [$detail['ema_alignment'] ?? 0, 15],
+                            'MACD Cross' => [$detail['macd_cross'] ?? 0, 10],
+                            'RSI Condition' => [$detail['rsi_condition'] ?? 0, 8],
+                            'ADX Strength' => [$detail['adx_strength'] ?? 0, 7],
+                        ]],
+                        'Multi-Timeframe' => ['max' => 20, 'val' => $bd['multi_tf'] ?? 0, 'items' => [
+                            'HTF (D1) Trend' => [$detail['htf_trend'] ?? 0, 10],
+                            'MTF (H4) Trend' => [$detail['mtf_trend'] ?? 0, 10],
+                        ]],
+                        'News/Sentiment' => ['max' => 20, 'val' => $bd['news'] ?? 0, 'items' => [
+                            'News Sentiment' => [$detail['news_sentiment'] ?? 0, 10],
+                            'AI Confidence' => [$detail['ai_confidence'] ?? 0, 10],
+                        ]],
+                        'Conditions' => ['max' => 20, 'val' => $bd['conditions'] ?? 0, 'items' => [
+                            'Market Regime' => [$detail['market_regime'] ?? 0, 10],
+                            'Volatility' => [$detail['volatility'] ?? 0, 5],
+                            'Stochastic' => [$detail['stochastic'] ?? 0, 5],
+                        ]]];
+
+                foreach ($categories as $cat_name => $cat): ?>
+                <div style="margin-bottom:1.25rem">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:.4rem">
+                        <strong><?= $cat_name ?></strong>
+                        <span><?= round($cat['val'], 1) ?> / <?= $cat['max'] ?></span>
+                    </div>
+                    <div style="background:var(--bg-input);border-radius:6px;height:10px;overflow:hidden">
+                        <div style="background:var(--primary);height:100%;width:<?= $cat['max'] > 0 ? round(($cat['val'] / $cat['max']) * 100) : 0 ?>%;border-radius:6px;transition:width .3s"></div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.25rem .5rem;margin-top:.35rem;font-size:.85rem;color:var(--text-muted)">
+                        <?php foreach ($cat['items'] as $label => [$val, $max]): ?>
+                        <span><?= $label ?>: <strong style="color:var(--text)"><?= round($val, 1) ?></strong>/<?= $max ?></span>
+                        <?php endforeach; ?>
+                    </div>
                 </div>
-            </div>
-            <?php endforeach; ?>
+                <?php endforeach;
+            endif; ?>
         </div>
     </div>
 
     <!-- Context -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.25rem">
         <div class="card">
+            <?php if ($is_pattern_mode): ?>
+            <div class="card-header"><h2>Pattern Details</h2></div>
+            <div class="table-wrapper">
+                <table class="data-table">
+                    <tbody>
+                        <tr><td>Mode</td><td><span class="badge"><?= htmlspecialchars($signal['mode_label'] ?? strtoupper($signal['mode'])) ?></span></td></tr>
+                        <tr><td>Pattern</td><td><strong><?= htmlspecialchars(str_replace('_', ' ', $signal['pattern'] ?? 'N/A')) ?></strong></td></tr>
+                        <tr><td>Filter</td><td><?= htmlspecialchars($signal['filter_name'] ?? 'N/A') ?></td></tr>
+                        <tr><td>Timeframe</td><td><?= htmlspecialchars($signal['timeframe']) ?></td></tr>
+                        <tr><td>Strategy</td><td><?= htmlspecialchars(str_replace('_', ' ', $signal['strategy'] ?? 'N/A')) ?></td></tr>
+                        <tr><td>Entry Zone</td><td><?= $signal['entry_zone_low'] ? fmt_price((float)$signal['entry_zone_low'], $signal['pair']) . ' — ' . fmt_price((float)$signal['entry_zone_high'], $signal['pair']) : 'N/A' ?></td></tr>
+                        <tr><td>Max Entry</td><td><?= $signal['max_entry'] ? fmt_price((float)$signal['max_entry'], $signal['pair']) : 'N/A' ?></td></tr>
+                        <tr><td>Valid Until</td><td><?= htmlspecialchars($signal['valid_until_str'] ?? 'N/A') ?></td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <?php else: ?>
+            <?php
+            $detail_mode_labels = [
+                'technical' => ['Technical Analysis', '#0ea5e9'],
+                'news' => ['News Sentiment', '#f59e0b'],
+                'hybrid' => ['Hybrid Confluence', '#8b5cf6'],
+                'ai' => ['AI Analysis', '#ec4899'],
+                'technical_news_filter' => ['Technical + News Filter', '#10b981'],
+            ];
+            $dm = $detail_mode_labels[$signal['mode']] ?? [strtoupper($signal['mode']), '#64748b'];
+            ?>
             <div class="card-header"><h2>Market Context</h2></div>
             <div class="table-wrapper">
                 <table class="data-table">
                     <tbody>
-                        <tr><td>Mode</td><td><span class="badge"><?= strtoupper($signal['mode']) ?></span></td></tr>
+                        <tr><td>Mode</td><td><span class="badge" style="background:<?= $dm[1] ?>22;color:<?= $dm[1] ?>;border:1px solid <?= $dm[1] ?>44"><?= $dm[0] ?></span></td></tr>
                         <tr><td>Timeframe</td><td><?= htmlspecialchars($signal['timeframe']) ?></td></tr>
                         <tr><td>HTF Trend</td><td><?= htmlspecialchars($signal['htf_trend'] ?? 'N/A') ?></td></tr>
                         <tr><td>MTF Trend</td><td><?= htmlspecialchars($signal['mtf_trend'] ?? 'N/A') ?></td></tr>
@@ -198,6 +273,7 @@ if ($view_id) {
                     </tbody>
                 </table>
             </div>
+            <?php endif; ?>
         </div>
 
         <div class="card">
@@ -235,6 +311,7 @@ if ($view_id) {
 // ── Filters ────────────────────────────────────────────────────────────────
 $status = $_GET['status'] ?? '';
 $pair   = $_GET['pair']   ?? '';
+$mode_f = $_GET['mode']   ?? '';
 $page   = max(1, (int)($_GET['page'] ?? 1));
 $per    = 25;
 $offset = ($page - 1) * $per;
@@ -244,6 +321,7 @@ $params = [];
 
 if ($status) { $where[] = "status = ?"; $params[] = $status; }
 if ($pair)   { $where[] = "pair = ?";   $params[] = $pair; }
+if ($mode_f) { $where[] = "mode = ?";   $params[] = $mode_f; }
 
 $where_sql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
 
@@ -255,12 +333,13 @@ $total = (int)(db_one(
 $pages = (int)ceil($total / $per);
 
 $signals = db_query(
-    "SELECT * FROM signals $where_sql ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    "SELECT * FROM signals $where_sql ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
     array_merge($params, [$per, $offset])
 );
 
 // Filters data
 $all_pairs = db_query("SELECT symbol FROM pairs ORDER BY symbol");
+$all_modes = db_query("SELECT DISTINCT mode FROM signals ORDER BY mode");
 $statuses  = ['OPEN', 'CLOSED_TP', 'CLOSED_SL', 'CLOSED_MANUAL', 'EXPIRED', 'CANCELLED'];
 
 $page_title = 'Signals';
@@ -287,6 +366,24 @@ require_once __DIR__ . '/../includes/header.php';
                 <?php endforeach; ?>
             </select>
 
+            <?php
+            $mode_filter_labels = [
+                'technical' => 'Technical', 'news' => 'News', 'hybrid' => 'Hybrid',
+                'ai' => 'AI', 'technical_news_filter' => 'Tech+News',
+            ];
+            ?>
+            <select name="mode" class="form-select w-auto">
+                <option value="">All Modes</option>
+                <?php foreach ($all_modes as $m):
+                    $mv = $m['mode'];
+                    $ml = $mode_filter_labels[$mv] ?? str_replace('_', ' ', $mv);
+                ?>
+                <option value="<?= htmlspecialchars($mv) ?>" <?= $mode_f === $mv ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($ml) ?>
+                </option>
+                <?php endforeach; ?>
+            </select>
+
             <button type="submit" class="btn btn-primary btn-sm">Filter</button>
             <a href="/signals.php" class="btn btn-secondary btn-sm">Clear</a>
 
@@ -303,13 +400,13 @@ require_once __DIR__ . '/../includes/header.php';
         <table class="data-table">
             <thead>
                 <tr>
-                    <th>Signal ID</th>
                     <th>Pair</th>
+                    <th>Mode</th>
                     <th>Direction</th>
+                    <th>TF</th>
                     <th>Entry</th>
                     <th>SL</th>
                     <th>TP</th>
-                    <th>Score</th>
                     <th>Status</th>
                     <th>P&L (pips)</th>
                     <th>Time</th>
@@ -331,22 +428,59 @@ require_once __DIR__ . '/../includes/header.php';
                     default         => ''
                 };
                 $pips = $s['actual_pips'] ?? null;
+                // Mode badge color
+                $mode_val = $s['mode'] ?? 'hybrid';
+                // Hybrid engine mode colors
+                $engine_mode_colors = [
+                    'technical'            => '#0ea5e9', // sky blue
+                    'news'                 => '#f59e0b', // amber
+                    'hybrid'               => '#8b5cf6', // violet
+                    'ai'                   => '#ec4899', // pink
+                    'technical_news_filter' => '#10b981', // emerald
+                ];
+                // Pattern engine mode colors (Mode_N)
+                $pattern_mode_colors = [
+                    1  => '#3b82f6', 2  => '#f97316', 3  => '#22c55e', 4  => '#eab308',
+                    5  => '#a855f7', 6  => '#ef4444', 7  => '#d97706', 8  => '#0ea5e9',
+                    9  => '#b91c1c', 10 => '#1d4ed8', 11 => '#c2410c', 12 => '#6b7280',
+                    13 => '#db2777', 14 => '#0891b2', 15 => '#374151', 16 => '#7c3aed',
+                    17 => '#78350f', 18 => '#16a34a', 19 => '#ea580c', 20 => '#dc2626',
+                    21 => '#1e40af', 22 => '#16a34a',
+                ];
+                // Engine mode labels for display
+                $engine_mode_labels = [
+                    'technical'            => 'Technical',
+                    'news'                 => 'News',
+                    'hybrid'               => 'Hybrid',
+                    'ai'                   => 'AI',
+                    'technical_news_filter' => 'Tech+News',
+                ];
+                if (isset($engine_mode_colors[$mode_val])) {
+                    $mode_color = $engine_mode_colors[$mode_val];
+                    $mode_display = $engine_mode_labels[$mode_val];
+                } else {
+                    preg_match('/(\d+)/', $mode_val, $m);
+                    $mode_num = isset($m[1]) ? (int)$m[1] : 0;
+                    $mode_color = $pattern_mode_colors[$mode_num] ?? '#6b7280';
+                    $mode_display = $mode_val;
+                }
                 ?>
                 <tr>
-                    <td><code><?= htmlspecialchars($s['signal_id']) ?></code></td>
                     <td><strong><?= htmlspecialchars($s['pair']) ?></strong></td>
+                    <td>
+                        <span style="background:<?= $mode_color ?>;color:#fff;padding:2px 7px;border-radius:4px;font-size:.75rem;font-weight:600">
+                            <?= htmlspecialchars($mode_display) ?>
+                        </span>
+                    </td>
                     <td>
                         <span class="badge <?= $s['direction'] === 'BUY' ? 'badge-buy' : 'badge-sell' ?>">
                             <?= $s['direction'] ?>
                         </span>
                     </td>
-                    <td><?= number_format((float)$s['entry_price'], 5) ?></td>
-                    <td class="text-danger"><?= number_format((float)$s['stop_loss'], 5) ?></td>
-                    <td class="text-success"><?= number_format((float)$s['take_profit'], 5) ?></td>
-                    <td>
-                        <span class="badge badge-score"><?= $s['confluence_score'] ?></span>
-                        <small><?= htmlspecialchars($s['quality_label'] ?? '') ?></small>
-                    </td>
+                    <td><small><?= htmlspecialchars($s['timeframe'] ?? '—') ?></small></td>
+                    <td><?= fmt_price((float)$s['entry_price'], $s['pair']) ?></td>
+                    <td class="text-danger"><?= fmt_price((float)$s['stop_loss'], $s['pair']) ?></td>
+                    <td class="text-success"><?= fmt_price((float)$s['take_profit'], $s['pair']) ?></td>
                     <td>
                         <span class="badge <?= $status_class ?>">
                             <?= htmlspecialchars($s['status']) ?>
@@ -384,7 +518,7 @@ require_once __DIR__ . '/../includes/header.php';
     <?php if ($pages > 1): ?>
     <div class="card-body pagination">
         <?php for ($i = 1; $i <= $pages; $i++): ?>
-        <a href="?page=<?= $i ?>&status=<?= urlencode($status) ?>&pair=<?= urlencode($pair) ?>"
+        <a href="?page=<?= $i ?>&status=<?= urlencode($status) ?>&pair=<?= urlencode($pair) ?>&mode=<?= urlencode($mode_f) ?>"
            class="btn btn-sm <?= $i === $page ? 'btn-primary' : 'btn-secondary' ?>">
             <?= $i ?>
         </a>

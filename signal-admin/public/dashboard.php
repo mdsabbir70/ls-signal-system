@@ -26,12 +26,12 @@ $win_rate = $total > 0 ? round(($today_signals['tp_hits'] / $total) * 100, 1) : 
 
 // Open signals
 $open_signals = db_query(
-    "SELECT * FROM signals WHERE status='OPEN' ORDER BY created_at DESC LIMIT 10"
+    "SELECT * FROM signals WHERE status='OPEN' ORDER BY created_at DESC, id DESC"
 );
 
 // Recent signals (last 5)
 $recent_signals = db_query(
-    "SELECT * FROM signals ORDER BY created_at DESC LIMIT 5"
+    "SELECT * FROM signals ORDER BY created_at DESC, id DESC LIMIT 5"
 );
 
 // Active pairs
@@ -161,9 +161,9 @@ require_once __DIR__ . '/../includes/header.php';
                             <?= $s['direction'] ?>
                         </span>
                     </td>
-                    <td><?= number_format((float)$s['entry_price'], 5) ?></td>
-                    <td class="text-danger"><?= number_format((float)$s['stop_loss'], 5) ?></td>
-                    <td class="text-success"><?= number_format((float)$s['take_profit'], 5) ?></td>
+                    <td><?= fmt_price((float)$s['entry_price'], $s['pair']) ?></td>
+                    <td class="text-danger"><?= fmt_price((float)$s['stop_loss'], $s['pair']) ?></td>
+                    <td class="text-success"><?= fmt_price((float)$s['take_profit'], $s['pair']) ?></td>
                     <td>
                         <span class="badge badge-score"><?= $s['confluence_score'] ?></span>
                         <small><?= htmlspecialchars($s['quality_label'] ?? '') ?></small>

@@ -259,30 +259,70 @@ class PriceFetcher:
             return None
 
     def get_current_price(self, pair: str) -> Optional[float]:
-        """Get latest price for a single pair. Used by signal monitor."""
+        """
+        Get latest price for a single pair. Used by signal monitor.
+        Priority:
+          1. Memory cache (30s)
+          2. Local CSV cache — M15 refreshed every ~16 min (no API call)
+          3. TwelveData /price endpoint — forex fallback
+          4. Binance CCXT ticker — crypto fallback
+        """
         cache_key = ('_price', pair)
         cached = self._cache.get(cache_key)
         if cached:
             price, ts = cached
-            if (time.time() - ts) < 30:   # 30-second cache
+            if (time.time() - ts) < 30:
                 return price
 
+        # ── 1. Local CSV cache (fastest, no API cost) ─────────────────────
         try:
-            import yfinance as yf
-            symbol = YAHOO_SYMBOL_MAP.get(pair, pair)
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period='1d', interval='5m')
+            from data.market_data_cache import _csv_path
+            import pandas as pd
+            for tf in ('M15', 'M30', 'H1'):
+                path = _csv_path(pair, tf)
+                if path.exists():
+                    df = pd.read_csv(path, index_col=0, parse_dates=True)
+                    df.columns = [c.lower().strip() for c in df.columns]
+                    if not df.empty and 'close' in df.columns:
+                        price = float(df['close'].iloc[-1])
+                        self._cache[cache_key] = (price, time.time())
+                        return price
+        except Exception as e:
+            logger.debug(f"CSV price read failed {pair}: {e}")
 
-            if (hist is None or hist.empty) and pair == 'XAUUSD':
-                ticker = yf.Ticker('GC=F')
-                hist = ticker.history(period='1d', interval='5m')
+        # ── 2. TwelveData /price — forex live price ────────────────────────
+        try:
+            from data.market_data_cache import TWELVE_MAP, _get_twelve_key
+            import urllib.request, json as _json
+            symbol = TWELVE_MAP.get(pair)
+            api_key = _get_twelve_key()
+            if symbol and api_key:
+                url = (f"https://api.twelvedata.com/price"
+                       f"?symbol={symbol}&apikey={api_key}")
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = _json.loads(resp.read().decode())
+                if 'price' in data:
+                    price = float(data['price'])
+                    self._cache[cache_key] = (price, time.time())
+                    return price
+        except Exception as e:
+            logger.debug(f"TwelveData price failed {pair}: {e}")
 
-            if hist is not None and not hist.empty:
-                price = float(hist['Close'].iloc[-1])
+        # ── 3. Binance CCXT — crypto live price ───────────────────────────
+        try:
+            from data.market_data_cache import CCXT_MAP
+            import ccxt
+            symbol = CCXT_MAP.get(pair)
+            if symbol:
+                exchange = ccxt.binance({'enableRateLimit': True})
+                ticker   = exchange.fetch_ticker(symbol)
+                price    = float(ticker['last'])
                 self._cache[cache_key] = (price, time.time())
                 return price
         except Exception as e:
-            logger.error(f"Current price fetch failed for {pair}: {e}")
+            logger.debug(f"Binance price failed {pair}: {e}")
+
         return None
 
     def clear_cache(self, pair: str = None):

@@ -138,7 +138,7 @@ class CorrelationResult:
 class CorrelationAnalyzer:
     """Analyzes pair correlations to prevent overexposure."""
 
-    MAX_SAME_CURRENCY_EXPOSURE = 3  # Max 3 positions with same currency
+    MAX_SAME_CURRENCY_EXPOSURE = 8  # Max 3 positions with same currency
     STRONG_CORR_THRESHOLD = 0.75    # Block if correlation > this
     MODERATE_CORR_THRESHOLD = 0.50  # Warn if correlation > this
 

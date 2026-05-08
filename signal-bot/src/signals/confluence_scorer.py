@@ -169,6 +169,7 @@ class ConfluenceScorer:
         session: SessionContext = None,      # Session-aware context
         correlation: CorrelationResult = None,  # Correlation check
         sentiment: SentimentResult = None,    # Market sentiment
+        pair: str = '',                          # Pair symbol (for crypto detection)
     ) -> tuple[float, ScoreBreakdown, str]:
         """
         Calculate confluence score.
@@ -241,7 +242,7 @@ class ConfluenceScorer:
         bd.market_regime += self._score_regime(regime, is_buy)
 
         # Volatility (5 pts)
-        bd.volatility = self._score_volatility(ltf)
+        bd.volatility = self._score_volatility(ltf, pair=pair)
 
         # Stochastic (5 pts)
         bd.stochastic = self._score_stochastic(ltf, is_buy)
@@ -404,24 +405,41 @@ class ConfluenceScorer:
 
     @staticmethod
     def _score_news(sentiment: str, is_buy: bool) -> float:
-        """News sentiment score 0-8."""
+        """News sentiment score 0-8.
+        Neutral = 5 (no news is mildly positive — absence of bad news).
+        Confirmed direction = 8 (full points).
+        Opposing direction = 0 (penalty)."""
         if is_buy:
-            return {'bullish': 8.0, 'neutral': 3.0, 'bearish': 0.0}.get(sentiment, 3.0)
+            return {'bullish': 8.0, 'neutral': 5.0, 'bearish': 0.0}.get(sentiment, 5.0)
         else:
-            return {'bearish': 8.0, 'neutral': 3.0, 'bullish': 0.0}.get(sentiment, 3.0)
+            return {'bearish': 8.0, 'neutral': 5.0, 'bullish': 0.0}.get(sentiment, 5.0)
 
     @staticmethod
     def _score_ai(ai_confidence: float, is_buy: bool, sentiment: str) -> float:
-        """AI confidence score 0-7."""
+        """AI confidence score 0-7.
+        No AI data (confidence=0): give 2/7 baseline (no contra-signal is mildly positive).
+        AI confirms direction: scale 0-7 by confidence.
+        AI opposes direction: 0 points."""
         if ai_confidence <= 0:
-            return 0.0
+            # No AI data — give a fair baseline instead of 0
+            return 2.0
+
         direction_confirmed = (
             (is_buy  and sentiment == 'bullish') or
             (not is_buy and sentiment == 'bearish')
         )
-        if not direction_confirmed:
-            return 0.0
-        return min(7.0, ai_confidence / 14.3)  # 100% confidence → 7 pts
+        if direction_confirmed:
+            return min(7.0, 2.0 + (ai_confidence / 20.0))  # 2 baseline + scaled
+
+        # AI has data but opposes our direction — penalize
+        direction_opposed = (
+            (is_buy  and sentiment == 'bearish') or
+            (not is_buy and sentiment == 'bullish')
+        )
+        if direction_opposed and ai_confidence >= 60:
+            return 0.0  # Strong opposing signal
+
+        return 1.0  # Weak/neutral AI signal
 
     # ── Liquidity / SMC scoring ───────────────────────────────────────────
 
@@ -501,23 +519,52 @@ class ConfluenceScorer:
         """Market regime score 0-10."""
         if not regime.tradeable:
             return 0.0
+
+        # Perfect alignment: trending in our direction
         if regime.regime == 'TRENDING_UP' and is_buy:
             return 10.0
         if regime.regime == 'TRENDING_DOWN' and not is_buy:
             return 10.0
-        return 3.0  # Partial — regime exists but wrong direction
+
+        # Trending but wrong direction — small penalty
+        if regime.regime in ('TRENDING_UP', 'TRENDING_DOWN'):
+            return 3.0
+
+        # RANGING with momentum bias — decent score
+        if regime.regime == 'RANGING':
+            if regime.momentum_state == 'BULLISH' and is_buy:
+                return 6.0
+            elif regime.momentum_state == 'BEARISH' and not is_buy:
+                return 6.0
+            return 4.0  # Ranging, no directional bias
+
+        # HIGH_VOLATILITY (crypto, tradeable) — moderate score
+        if regime.regime == 'HIGH_VOLATILITY':
+            if regime.momentum_state == 'BULLISH' and is_buy:
+                return 7.0
+            elif regime.momentum_state == 'BEARISH' and not is_buy:
+                return 7.0
+            return 4.0
+
+        return 3.0  # Fallback
 
     @staticmethod
-    def _score_volatility(r: IndicatorResult) -> float:
-        """Volatility score 0-5 (medium volatility = best)."""
+    def _score_volatility(r: IndicatorResult, pair: str = '') -> float:
+        """Volatility score 0-5 (medium volatility = best).
+        Crypto pairs have higher natural volatility, so thresholds scale up."""
         if r.atr_pct is None:
             return 3.0  # Unknown — give middle score
-        if 0.1 <= r.atr_pct <= 0.5:
+
+        # Crypto pairs have 3x higher natural ATR%
+        is_crypto = any(pair.upper().endswith(s) for s in ('USDT', 'USDC', 'BTC'))
+        scale = 3.0 if is_crypto else 1.0
+
+        if 0.1 * scale <= r.atr_pct <= 0.5 * scale:
             return 5.0   # Ideal range
-        elif 0.5 < r.atr_pct <= 0.8:
+        elif 0.5 * scale < r.atr_pct <= 0.8 * scale:
             return 3.0   # Slightly high
-        elif r.atr_pct > 0.8:
-            return 0.0   # Too volatile
+        elif r.atr_pct > 0.8 * scale:
+            return 0.0   # Too volatile even for this asset type
         else:
             return 1.0   # Too quiet
 

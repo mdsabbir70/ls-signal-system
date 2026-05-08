@@ -21,6 +21,7 @@ import ta
 from dataclasses import dataclass
 from typing import Optional
 from utils.logger import setup_logger
+from utils.pair_config import pip_size as _cfg_pip_size, price_decimals as _cfg_decimals
 
 logger = setup_logger('indicators')
 
@@ -193,31 +194,21 @@ class IndicatorEngine:
 
     # ── ATR-based SL/TP ────────────────────────────────────────────────────
 
-    def calc_sl_tp(self, entry: float, direction: str, atr: float) -> tuple:
+    def calc_sl_tp(self, entry: float, direction: str, atr: float, pair: str = '') -> tuple:
         if direction == 'BUY':
             sl = entry - (self.ATR_SL_MULTIPLIER * atr)
             tp = entry + (self.ATR_TP_MULTIPLIER * atr)
         else:
             sl = entry + (self.ATR_SL_MULTIPLIER * atr)
             tp = entry - (self.ATR_TP_MULTIPLIER * atr)
-        return round(sl, 5), round(tp, 5)
+        dec = _cfg_decimals(pair) if pair else 5
+        return round(sl, dec), round(tp, dec)
 
     def calc_pip_distance(self, price1: float, price2: float, pair: str) -> float:
+        "Calculate distance in pips using centralized pair_config."
         diff = abs(price1 - price2)
-        if pair.endswith('USDT'):
-            # Crypto: 1 pip = $0.01 for coins > $1, proportional for smaller coins
-            avg_price = (abs(price1) + abs(price2)) / 2 if price1 and price2 else 1
-            if avg_price >= 1000:       # BTC, BNB
-                return round(diff / 1.0, 1)
-            elif avg_price >= 1:        # ETH, SOL, XRP, TON, ADA, LINK, SUI, DOT, HYPE
-                return round(diff / 0.01, 1)
-            else:                       # DOGE, PEPE (sub-dollar)
-                return round(diff / 0.0001, 1)
-        if 'JPY' in pair:
-            return round(diff / 0.01, 1)
-        if 'XAU' in pair:
-            return round(diff / 0.1, 1)
-        return round(diff / 0.0001, 1)
+        ps = _cfg_pip_size(pair)
+        return round(diff / ps, 1) if ps > 0 else 0.0
 
     # ── Helpers ────────────────────────────────────────────────────────────
 

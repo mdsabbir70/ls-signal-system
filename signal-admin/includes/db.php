@@ -69,6 +69,29 @@ function set_setting(string $key, $value): void {
     db_exec('UPDATE settings SET setting_value = ? WHERE setting_key = ?', [$val, $key]);
 }
 
+/**
+ * Get the correct number of decimal places for a trading pair's price display.
+ */
+function price_decimals(string $pair): int {
+    static $map = [
+        'BTCUSDT'=>2,'ETHUSDT'=>2,'BNBUSDT'=>2,
+        'SOLUSDT'=>4,'LINKUSDT'=>4,'DOTUSDT'=>4,'ADAUSDT'=>4,'TONUSDT'=>4,'HYPEUSDT'=>4,'SUIUSDT'=>4,
+        'XRPUSDT'=>6,'DOGEUSDT'=>6,
+        'PEPEUSDT'=>8,
+    ];
+    if (isset($map[$pair])) return $map[$pair];
+    if (str_contains($pair, 'JPY')) return 3;
+    if (str_contains($pair, 'XAU') || str_contains($pair, 'XAG')) return 2;
+    return 5;
+}
+
+/**
+ * Format a price with the correct decimals for the given pair.
+ */
+function fmt_price(float $price, string $pair): string {
+    return number_format($price, price_decimals($pair));
+}
+
 function cast_setting($value, string $type) {
     if ($value === null) return null;
     switch ($type) {
